@@ -1,0 +1,342 @@
+---
+title: "pH"
+author: "Rachel"
+date: "11/5/2021"
+output: html_document
+---
+
+```{r}
+library(lmerTest)
+library(car)
+library(sjPlot)
+library(ggeffects)
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+```
+
+```{r}
+pH_data<-read.csv("pH_data.csv")
+```
+
+#modeling effect of cycle phase on pH
+```{r}
+pH_noPostcop <- pH_data %>%
+  filter(Postcop == "N")
+pH_noPostcop$phase <- relevel(as.factor(pH_noPostcop$phase), ref = "non-fertile")
+
+mod <- lmer(Avg.pH ~ phase + MalePresence + Avg.temp + (1|FemaleID), data=pH_noPostcop)
+summary(mod)
+```
+
+```{r}
+# Extract residuals
+residuals <- resid(mod)
+
+# Q-Q plot
+qqnorm(residuals)
+
+#colinearity
+vif(mod)
+```
+
+#visualize
+```{r}
+dat <- ggpredict(mod, terms=c("phase"))
+dat<- data.frame(dat)
+dat.tidy <- dat %>%
+  mutate(stder.high = (predicted + std.error)) %>%
+  mutate(stder.low = (predicted - std.error))
+
+pH_phase_plot <- ggplot(data= dat.tidy, aes(x=x, y=predicted)) +
+  #geom_boxplot(aes(color=phase), outlier.shape=NA, size=0.5) +
+  geom_point(aes(color=x),size=2) +
+  geom_errorbar(aes(ymin=conf.low, ymax=conf.high, color=x), width=0.1, size=1) +
+  scale_color_manual(values=c("#0076BA", "#FEAE00" , "#FF644E", "#73BFFA")) +
+  geom_jitter(data= pH_phase_tidy, aes(x=phase, y=Avg.pH), width=0.25, size=0.3, alpha=0.2)+
+  theme_light() +
+  scale_x_discrete(labels = c("non-fertile", "pre-fertile", "fertile", "post-fertile")) +
+  theme(plot.title= element_blank(), axis.text.y=element_text(size=12), axis.text.x=element_text(size=12, angle=45, hjust=1),  axis.title=element_text(size=14), legend.position="none") +
+  xlab("") +
+  ylab("Vaginal pH"); pH_phase_plot 
+
+ggsave("pH_phase_plot.pdf", pH_phase_plot, width=3, height=3.5)
+```
+
+
+# post cop analyses
+
+```{r}
+Postcop_ph<-subset(pH_data, Postcop == "Y") #15
+Noncop_ph<-subset(pH_data, Postcop == "N" & (phase == "pre-fertile" | phase == "fertile") & (FemaleID == "Suzon" | FemaleID == "Salade" | FemaleID == "Sottise" | FemaleID == "Vertige" | FemaleID == "Vuei")) #47
+pH_postcop_tidy<-rbind(Postcop_ph, Noncop_ph)
+
+mod2 <- lmer(Avg.pH ~ Postcop + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+summary(mod2)
+```
+
+```{r}
+# Extract residuals
+residuals <- resid(mod2)
+
+# Q-Q plot
+qqnorm(residuals)
+
+#colinearity
+vif(mod2)
+```
+
+#visualize
+```{r}
+dat <- ggpredict(mod2, terms=c("Postcop"))
+dat<- data.frame(dat)
+dat.tidy <- dat %>%
+  mutate(stder.high = (predicted + std.error)) %>%
+  mutate(stder.low = (predicted - std.error))
+
+pH_postcop_plot <- ggplot(data= dat.tidy, aes(y=predicted, x= x)) +
+    geom_jitter(data= pH_postcop_tidy, aes(x=Postcop, y=Avg.pH), width=0.2, size=0.5, alpha=0.5)+
+  geom_point(aes(color=x),size=2) +
+  geom_errorbar(aes(ymin=conf.low, ymax=conf.high, color=x), width=0.1, size=1) +
+  scale_color_manual(values= c("#531B93", "#D783FF")) +
+  theme_light() +
+  theme(plot.title= element_blank(), legend.position= "none") +
+  scale_x_discrete(labels= c("N"= "No", "Y"= "Yes")) +
+  xlab("Post-copulatory status") +
+  ylab("Vaginal pH"); pH_postcop_plot 
+
+ggsave("pH_postcop_plot.pdf", pH_postcop_plot, width=2.5, height=3)
+```
+
+
+#heteroscedasicity test
+```{r}
+library(lmtest)
+mod2 <- lmer(Avg.pH ~ Postcop + phase + MaleStatus + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+
+residuals <- resid(mod2)
+fitted_values <- fitted(mod2)
+lm_model <- lm(residuals ~ fitted_values)
+
+#Breusch-Pagan test
+bptest(lm_model)
+```
+
+
+
+#Female specific patterns figure 
+```{r}
+mean_data_grouped <- pH_postcop_tidy %>%
+  group_by(FemaleID, Postcop) %>%
+  summarize(MeanValue = mean(Avg.pH))
+
+library(RColorBrewer)
+
+pH_postcop_female_plot <- ggplot(data= pH_postcop_tidy, aes(x=Postcop, y=Avg.pH, color=FemaleID)) +
+  geom_line(data= mean_data_grouped, aes(x=Postcop, y=MeanValue, group=FemaleID, color=FemaleID), size=1) +
+  geom_jitter(data= pH_postcop_tidy, aes(x=Postcop, y=Avg.pH), width=0.1, size=0.5)+
+  theme_light() +
+  scale_color_brewer(palette = "Set1", labels=c(1:5), name="Female ID")+
+  scale_x_discrete(labels = c("No", "Yes")) +
+  theme(plot.title= element_blank()) +
+  xlab("Post-copulatory Status") +
+  ylab("Vaginal pH"); pH_postcop_female_plot 
+
+ggsave("pH_postcop_perFemale.pdf", pH_postcop_female_plot, width=3.5, height=3)
+```
+
+
+### post cop genotype analyses ###
+
+#stMLH
+```{r}
+mod7 <- lmer(Avg.pH ~ Postcop*Male_stMLH + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+
+summary(mod7)
+mod7Anova <- Anova(mod7); mod7Anova 
+mod7pvalue <- mod7Anova[6,3]
+
+plot_model(mod7, type="pred", terms=c("Postcop", "Male_stMLH"))
+```
+
+
+# Male MHC I diversity
+```{r}
+mod8 <- lmer(Avg.pH ~  Postcop*Male_MHCI_allele + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+
+summary(mod8)
+mod8Anova <- Anova(mod8); mod8Anova
+mod8pvalue <- mod8Anova[6,3]
+plot_model(mod8, type="pred", terms=c("Postcop", "Male_MHCI_allele"))
+```
+
+#Male MHCII allele diversity
+```{r}
+mod9 <- lmer(Avg.pH ~  Postcop*Male_MHCII_allele + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+summary(mod9)
+mod9Anova <- Anova(mod9); mod9Anova
+mod9pvalue <- mod9Anova[6,3]
+plot_model(mod9, type="pred", terms=c("Postcop [all]", "Male_MHCII_allele [all]"))
+```
+
+
+#Male MHCI supertype diversity
+```{r}
+mod10 <- lmer(Avg.pH ~Postcop*Male_MHCI_supertype + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+summary(mod10)
+mod10Anova <- Anova(mod10); mod10Anova
+mod10pvalue <- mod10Anova[6,3]
+plot_model(mod10, type="pred", terms=c("Postcop [all]", "Male_MHCI_supertype [all]"))
+```
+
+#Male MHCII supertype diversity
+```{r}
+mod11 <- lmer(Avg.pH ~  Postcop*Male_MHCII_supertype + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+summary(mod11)
+mod11Anova <- Anova(mod11); mod11Anova
+mod11pvalue <- mod11Anova[6,3]
+plot_model(mod11, type="pred", terms=c("Postcop", "Male_MHCII_supertype"))
+```
+
+```{r}
+p.adjust(c(mod7pvalue, mod8pvalue, mod9pvalue, mod10pvalue, mod11pvalue), method="BH")
+```
+
+
+
+## complementarity analyses
+
+#KINSHIP
+```{r}
+mod12 <- lmer(Avg.pH ~  Postcop*KINSHIP + phase + MalePresence + Avg.temp + (1|MaleID)+ (1|FemaleID), data=pH_postcop_tidy)
+
+summary(mod12)
+mod12Anova <- Anova(mod12); mod12Anova
+mod12pvalue <- mod12Anova[6,3]
+```
+
+```{r}
+dat <- ggpredict(mod12, terms=c("KINSHIP [all]", "Postcop"))
+dat<- data.frame(dat)
+dat.tidy <- dat %>%
+  mutate(stder.high = (predicted + std.error)) %>%
+  mutate(stder.low = (predicted - std.error))
+
+KIN_pH_oneplot <- ggplot(data= dat.tidy, aes(y=predicted, x= group, color=x, group=x)) +
+  geom_point(position=position_dodge(width=0.8), size=3) +
+  geom_errorbar(aes(ymin = stder.low, ymax = stder.high, linetype=NULL, group=x), width=0.3, padding=0.3, position=position_dodge(width=0.8), size=1) +
+    theme_bw() +
+  theme(plot.title=element_text(size=16, hjust=0.5), axis.title=element_text(size=12)) +
+    geom_point(data= na.omit(pH_postcop_tidy), aes(x=Postcop, y=Avg.pH, color=KINSHIP, group=KINSHIP), size=2, shape= 21, position=position_dodge(width=0.8)) + 
+   scale_color_gradient2(low = "grey1", mid= "grey40", high = "grey80", name= "Kinship", trans= "reverse", limits= c(0.25, -0.25), breaks= c(0.2, 0.1, 0, -0.1, -0.2), labels= c(0.2, 0.1, 0, -0.1, -0.2))+
+  ylab("Vaginal pH") +
+  xlab("Post-copulatory Status") +
+  ggtitle("Kinship") +
+  scale_x_discrete(labels=c("No", "Yes"));KIN_pH_oneplot
+
+ggsave("Kinship_pH.pdf", KIN_pH_oneplot, width=4, height=4)
+```
+
+
+#MHC I allele comp
+
+```{r}
+mod13 <- lmer(Avg.pH ~  Postcop*MHCI_allele_comp + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+summary(mod13)
+mod13Anova <- Anova(mod13); mod13Anova
+mod13pvalue <- mod13Anova[6,3]
+plot_model(mod13, type="pred", terms=c("Postcop", "MHCI_allele_comp"))
+```
+
+MHCII allele comp
+```{r}
+mod14 <- lmer(Avg.pH ~  Postcop*MHCII_allele_comp + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+summary(mod14)
+mod14Anova <- Anova(mod14); mod14Anova
+mod14pvalue <- mod14Anova[6,3]
+plot_model(mod14, type="pred", terms=c("Postcop", "MHCII_allele_comp"))
+```
+
+
+```{r}
+dat <- ggpredict(mod14, terms=c("MHCII_allele_comp [all]", "Postcop"))
+dat<- data.frame(dat)
+dat.tidy <- dat %>%
+  mutate(stder.high = (predicted + std.error)) %>%
+  mutate(stder.low = (predicted - std.error))
+
+
+MHCII_allele_comp_pH_oneplot <- ggplot(data= dat.tidy, aes(y=predicted, x= group, color=x, group=x)) +
+  geom_point(position=position_dodge(width=0.6), size=3) +
+  geom_errorbar(aes(ymin = stder.low, ymax = stder.high, linetype=NULL, group=x), width=0.3, position=position_dodge(width=0.6), size=1) +
+    theme_bw() +
+  theme(plot.title=element_text(size=16, hjust=0.3), axis.title=element_text(size=12)) +
+    geom_point(data= na.omit(pH_postcop_tidy), aes(x=Postcop, y=Avg.pH, color=MHCII_allele_comp, group=MHCII_allele_comp), size=1.8, shape=21, position=position_dodge(width=0.6)) +
+   scale_color_gradient2(high = "grey1", mid= "grey40", low="grey80", midpoint= 0.5, name= "Proportion \nshared \nalleles", breaks=c(0,0.2,0.4,0.6,0.8,1.0), limits=c(-0.05, 1.05)) +
+  guides(color = guide_colorbar(reverse=T)) +
+  ylab("Vaginal pH") +
+  xlab("Post-copulatory Status") +
+  ggtitle("MHC II allelic complementarity") +
+  scale_x_discrete(labels=c("No", "Yes"));MHCII_allele_comp_pH_oneplot
+
+ggsave("MHCII_allele_comp_pH.pdf", MHCII_allele_comp_pH_oneplot, width=4, height=4)
+```
+
+
+
+#MHCI supertype comp
+```{r}
+mod15 <- lmer(Avg.pH ~  Postcop*MHCI_supertype_comp + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+summary(mod15)
+mod15Anova <- Anova(mod15); mod15Anova
+mod15pvalue <- mod15Anova[6,3]
+plot_model(mod15, type="pred", terms=c("Postcop", "MHCI_supertype_comp"))
+```
+
+
+#MHCII supertype comp
+```{r}
+mod16 <- lmer(Avg.pH ~  Postcop*MHCII_supertype_comp + phase + MalePresence + Avg.temp + (1|MaleID) + (1|FemaleID), data=pH_postcop_tidy)
+summary(mod16)
+mod16Anova <- Anova(mod16); mod16Anova
+mod16pvalue <- mod16Anova[6,3]
+plot_model(mod16, type="pred", terms=c("Postcop", "MHCII_supertype_comp"))
+```
+
+```{r}
+dat <- ggpredict(mod16, terms=c("MHCII_supertype_comp [all]", "Postcop"))
+dat<- data.frame(dat)
+dat.tidy <- dat %>%
+  mutate(stder.high = (predicted + std.error)) %>%
+  mutate(stder.low = (predicted - std.error))
+
+
+MHCII_supertype_comp_pH_oneplot <- ggplot(data= dat.tidy, aes(y=predicted, x= group, color=x, group=x)) +
+geom_point(position=position_dodge(width=0.8), size=3) +
+  geom_errorbar(aes(ymin = stder.low, ymax = stder.high, linetype=NULL, group=x), width=0.3, position=position_dodge(width=0.8), size=0.7) +
+    theme_bw() +
+  theme(plot.title=element_text(size=16, hjust=0.3), axis.title=element_text(size=12)) +
+    geom_point(data= na.omit(pH_postcop_tidy), aes(x=Postcop, y=Avg.pH, color=MHCII_supertype_comp, group=MHCII_supertype_comp), size=1.5, shape=21, position=position_dodge(width=0.8)) +
+   scale_color_gradient2(high = "grey0", mid= "grey40", low="grey80", midpoint= 0.5, name= "Proportion \nshared \nsupertypes", breaks=c(0,0.2,0.4,0.6,0.8,1.0), limits=c(-0.05, 1.05)) +
+  guides(color = guide_colorbar(reverse=T)) +
+  ylab("Vaginal pH") +
+  xlab("Post-copulatory Status") +
+  ggtitle("MHC II supertype complementarity") +
+  scale_x_discrete(labels=c("No", "Yes"), expand=expansion(mult=.2));MHCII_supertype_comp_pH_oneplot
+
+ggsave("MHCII_supertype_comp_pH.pdf", MHCII_supertype_comp_pH_oneplot, width=4, height=4)
+```
+
+
+```{r}
+p.adjust(c(mod12pvalue, mod13pvalue, mod14pvalue, mod15pvalue, mod16pvalue), method="BH")
+```
+
+
+## Plot 3 significant pH 
+
+```{r}
+Three_pH_plots<- ggarrange(KIN_pH_oneplot, MHCII_allele_comp_pH_oneplot, MHCII_supertype_comp_pH_oneplot, labels=c("a)", "b)", "c)"), hjust=-0.2, nrow=1, ncol=3); Three_pH_plots
+```
+
+

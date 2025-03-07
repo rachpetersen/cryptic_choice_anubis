@@ -1,0 +1,384 @@
+---
+title: "Aim 1: phase DE"
+output: html_document
+date: "2025-03-03"
+---
+
+```{r}
+library(tidyverse)
+library(lattice)
+library(clusterProfiler)
+library(enrichplot)
+library(edgeR)
+```
+
+#load count data
+```{r}
+load("anubis_featurecounts.Rdata")
+counts <- as.data.frame(anubisfc$counts)
+colnames(counts)<-gsub(".anubis.useqs.merged.bam", "", colnames(counts)) 
+```
+
+#Find best phase samples
+```{r}
+CountsperSampleType<-read.csv("DE_sample_metadata.csv")
+
+NotPostcop<-subset(CountsperSampleType, Postcop == "N")
+
+PreFertile<-subset(NotPostcop, phasecode == "PreF") 
+PreFertile_ordered <- PreFertile[order(PreFertile$uniquely_mapped_total, decreasing=TRUE), ]
+PreFertile_top8<-PreFertile_ordered[1:8,]
+
+Fertile<-subset(NotPostcop, phasecode == "F")
+Fertile_ordered <- Fertile[order(Fertile$uniquely_mapped_total, decreasing=TRUE), ]
+Fertile_top8<-Fertile_ordered[1:8,]
+
+PostFertile<-subset(NotPostcop, phasecode == "PostF")
+PostFertile_ordered <- PostFertile[order(PostFertile$uniquely_mapped_total, decreasing=TRUE), ]
+PostFertile_top8<-PostFertile_ordered[1:8,]
+
+NonFertile<-subset(NotPostcop, phasecode == "NonF")
+NonFertile_ordered <- NonFertile[order(NonFertile$uniquely_mapped_total, decreasing=TRUE), ]
+NonFertile_top8<-NonFertile_ordered[1:8,]
+
+Top32<-do.call(rbind, list(PreFertile_top8, Fertile_top8, PostFertile_top8, NonFertile_top8))
+
+VagNoPostcoptop32 <- CountsperSampleType %>%
+  filter(Sample_ID %in% Top32$Sample_ID)
+
+VagNoPostcoptop32Phase <- as.vector(VagNoPostcoptop32$phasecode)
+```
+
+#filter counts for phase samples
+```{r}
+countsnopostcop_top32 <- counts[,colnames(counts) %in% Top32$Sample_ID]
+```
+
+#Create DGEList
+```{r}
+DGEList= NULL
+DGEList <- DGEList(counts=countsnopostcop_top32, genes=anubisfc$annotation[,c("GeneID","Length")], group=factor(VagNoPostcoptop32Phase))
+```
+
+#Remove low expressed genes (>10cpm in at least half of samples)
+```{r}
+keep <- rowSums(cpm(DGEList) > 10) >= 16
+FilteredDGEList <- DGEList[keep,]
+```
+
+#Remove genes starting with "LOC"
+```{r}
+FilteredDGEList$counts<- FilteredDGEList$counts[!grepl("LOC", rownames(FilteredDGEList$counts)), ]
+FilteredDGEList$genes<- FilteredDGEList$genes[!grepl("LOC", rownames(FilteredDGEList$genes)), ]
+```
+
+#Reset the library sizes
+```{r}
+FilteredDGEList$samples$lib.size <- colSums(FilteredDGEList$counts)
+```
+
+
+################
+# Differential expression analyses
+################
+
+
+#Create vectors with metadata information
+```{r}
+VagNoPostcoptop32$phasecode <- relevel(as.factor(VagNoPostcoptop32$phasecode), ref = "NonF")
+VagNoPostcoptop32$male_status<-gsub(" ", "", VagNoPostcoptop32$male_status)
+MalePresence <- as.vector(VagNoPostcoptop32$male_status)
+RIN <- as.vector(VagNoPostcoptop32$RIN_RQN.y)
+FemaleID <- as.vector(VagNoPostcoptop32$FemaleID)
+```
+
+#Run model
+```{r}
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ VagNoPostcoptop32$phasecode + RIN + MalePresence)
+colnames(design)[1:4] <- c("Intercept", "fertile", "postfertile", "prefertile")
+voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
+dupcor <- duplicateCorrelation(voom_matrix, design, block=FemaleID)
+fit <- lmFit(voom_matrix, design, block=FemaleID, correlation=dupcor$consensus)
+fit<- eBayes(fit) # runs the linear model
+```
+
+
+#See results: fertile v nonfertile
+```{r}
+coeff<- as.data.frame(fit$coeff[,2])
+pvalues<- as.data.frame(fit$p.value[,2])
+qvalues<- as.data.frame(apply(fit$p.value, 2, function(x)p.adjust(x, method="fdr"))[,2])
+
+FvNonF<-cbind(coeff, pvalues, qvalues)
+colnames(FvNonF)<- c("coeff", "pvalue", "qvalue")
+sig<-subset(FvNonF, qvalue < 0.1); dim(sig) 
+
+Fertile_sig_genes<- sig
+Fertile_sig_genes$Gene<-rownames(Fertile_sig_genes)
+Fertile_sig_genes$comparison<-"FvNonF"
+```
+
+#prefertile v nonfertile
+```{r}
+coeff<- as.data.frame(fit$coeff[,4])
+pvalues<- as.data.frame(fit$p.value[,4])
+qvalues<- as.data.frame(apply(fit$p.value, 2, function(x)p.adjust(x, method="fdr"))[,4])
+
+PreFvNonF<-cbind(coeff, pvalues, qvalues)
+colnames(PreFvNonF)<- c("coeff", "pvalue", "qvalue")
+sig<-subset(PreFvNonF, qvalue < 0.1); dim(sig) 
+
+Prefertile_sig_genes<- sig
+Prefertile_sig_genes$Gene<-rownames(Prefertile_sig_genes)
+Prefertile_sig_genes$comparison<-"PreFvNonF"
+```
+
+#postfertile v nonfertile
+```{r}
+coeff<- as.data.frame(fit$coeff[,3])
+pvalues<- as.data.frame(fit$p.value[,3])
+qvalues<- as.data.frame(apply(fit$p.value, 2, function(x)p.adjust(x, method="fdr"))[,3])
+
+PostFvNonF<-cbind(coeff, pvalues, qvalues)
+colnames(PostFvNonF)<- c("coeff", "pvalue", "qvalue")
+sig<-subset(PostFvNonF, qvalue < 0.1); dim(sig) 
+
+Postfertile_sig_genes<- sig
+Postfertile_sig_genes$Gene<-rownames(Postfertile_sig_genes)
+Postfertile_sig_genes$comparison<-"PostFvNonF"
+```
+
+
+#make contrasts to get other pairwise comparisons
+```{r}
+contrast.matrix <- makeContrasts(
+  prefertile_v_fertile = prefertile - fertile,
+  prefertile_v_postfertile = prefertile - postfertile,
+  fertile_v_postfertile= fertile - postfertile,
+  levels = design
+)
+
+fit2 <- eBayes(contrasts.fit(fit, contrast.matrix))
+
+```
+
+#prefertile v fertile
+```{r}
+
+coeff<- as.data.frame(fit2$coeff[,1])
+pvalues<- as.data.frame(fit2$p.value[,1])
+qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr"))[,1])
+
+PreFvF<-cbind(coeff, pvalues, qvalues)
+colnames(PreFvF)<- c("coeff", "pvalue", "qvalue")
+PreFvF_sig<-subset(PreFvF, qvalue < 0.1); dim(PreFvF_sig) 
+PreFvF_sig$Gene<-rownames(PreFvF_sig)
+PreFvF_sig$comparison<-"PreFvF"
+```
+
+#prefertile v postfertile
+```{r}
+coeff<- as.data.frame(fit2$coeff[,2])
+pvalues<- as.data.frame(fit2$p.value[,2])
+qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr"))[,2])
+
+PreFvPostF<-cbind(coeff, pvalues, qvalues)
+colnames(PreFvPostF)<- c("coeff", "pvalue", "qvalue")
+PreFvPostF_sig<-subset(PreFvPostF, qvalue < 0.1); dim(PreFvPostF_sig) 
+PreFvPostF_sig$Gene<-rownames(PreFvPostF_sig)
+PreFvPostF_sig$comparison<-"PreFvPostF"
+```
+
+#fertile v postfertile
+```{r}
+coeff<- as.data.frame(fit2$coeff[,3])
+pvalues<- as.data.frame(fit2$p.value[,3])
+qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr"))[,3])
+
+FvPostF<-cbind(coeff, pvalues, qvalues)
+colnames(FvPostF)<- c("coeff", "pvalue", "qvalue")
+FvPostF_sig<-subset(FvPostF, qvalue < 0.1); dim(FvPostF_sig) 
+FvPostF_sig$Gene<-rownames(FvPostF_sig)
+FvPostF_sig$comparison<-"FvPostF"
+```
+
+#Write table of all results
+```{r}
+Allcomparisons<-do.call(rbind, list(Fertile_sig_genes, Prefertile_sig_genes, Postfertile_sig_genes, PreFvF_sig, PreFvPostF_sig, FvPostF_sig))
+write.table(Allcomparisons, "DE_results_phase.txt", quote=F, row.names=F, col.names=T, sep="\t")
+```
+
+#visualize 
+```{r}
+## Heatmap of number of DE genes
+DE_genes <- data.frame(V1=c("non-fertile", "non-fertile", "non-fertile", "pre-fertile", "pre-fertile", "fertile"), V2=c("pre-fertile", "fertile", "post-fertile", "fertile", "post-fertile", "post-fertile"), value=c(2390, 2481, 2111, 8, 58, 757))
+
+ordered_phases<-c("non-fertile", "pre-fertile", "fertile", "post-fertile")
+
+DE_genes$V1 <- factor(DE_genes$V1, levels = ordered_phases)
+DE_genes$V2 <- factor(DE_genes$V2, levels = ordered_phases)
+
+DEphase_heatmap<-ggplot(data=DE_genes, aes(x=V1, y=V2, fill=value)) +
+  geom_tile(color="black") +
+  geom_text(aes(label = value), size = 4) +
+  scale_fill_gradient2(low = "white", high = "gray50") +
+  theme_minimal() +
+  coord_fixed() + 
+  labs(x = "", y = "", fill = "DE genes") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14, color="black"), axis.text.y = element_text(size=14, color="black"), legend.position = "right"); DEphase_heatmap
+
+ggsave("DEphase_heatmap.pdf", DEphase_heatmap, width=4, height=4)
+```
+
+```{r}
+#venn diagram
+
+library(ggVennDiagram)
+
+data <- list(
+  Fertile = Fertile_sig_genes$Gene,
+  "Pre-fertile" = Prefertile_sig_genes$Gene,
+  "Post-fertile" = Postfertile_sig_genes$Gene
+)
+
+DE_venn<-ggVennDiagram(data, 
+              label = "count", 
+              set_color = c("#FEAE00","#FF644E", "#73BFFA"),
+              set_size = 7,
+              label_size = 6,
+              edge_size = 2,
+              category.names = c("Pre-fertile", "Fertile", "\nPost-fertile")) +
+  scale_fill_gradient(low="white", high="white")+
+    theme_void() +
+  scale_x_continuous(expand = expansion(mult = .2)) +
+  scale_y_continuous(expand = expansion(mult = .2)) +
+  theme(legend.position="none"); DE_venn
+    
+ggsave("DE_venn.pdf", DE_venn, width=4, height=4)
+```
+
+
+
+################
+# GSEA
+################
+
+
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+library(biomaRt)
+```
+
+```{r}
+# Connect to Ensembl BioMart and select Papio anubis
+ensembl <- useMart("ensembl", dataset = "panubis_gene_ensembl")  
+
+# Retrieve GO term annotations for your genes
+go_annotations <- getBM(attributes = c("external_gene_name", "go_id", "name_1006"),
+                        mart = ensembl)
+
+# Create TERM2GENE data frame (GO term to gene symbol mapping)
+TERM2GENE <- go_annotations[, c("go_id", "external_gene_name")]
+
+# Create TERM2NAME data frame (GO term to GO name mapping)
+TERM2NAME <- unique(go_annotations[, c("go_id", "name_1006")])
+```
+
+
+```{r}
+coeff_gsea<-as.data.frame(fit$coefficients)
+coeff_gsea$geneID<-rownames(coeff_gsea)
+```
+
+#Fertile v non-fertile phase
+```{r}
+original_PhaseF_gene_list <- (coeff_gsea$fertile)
+names(original_PhaseF_gene_list) <- coeff_gsea$geneID
+PhaseF_gene_list<-na.omit(original_PhaseF_gene_list)
+PhaseF_gene_list = sort( (PhaseF_gene_list), decreasing = TRUE)
+
+```
+
+```{r}
+gsea_PhaseF <- GSEA(
+  geneList = PhaseF_gene_list ,
+  TERM2GENE = TERM2GENE,
+  TERM2NAME = TERM2NAME,
+  pvalueCutoff = 0.05
+)
+```
+
+```{r}
+write.table(gsea_PhaseF@result, "gsea_PhaseF.txt", quote=F, row.names=F, col.names=T, sep="\t")
+```
+
+#Visualize
+```{r}
+#dotplot
+PhaseFdot<-dotplot(gsea_PhaseF, showCategory=20, color="p.adjust", split=".sign") + facet_grid(.~.sign) +
+  theme(strip.text=element_text(size=15), axis.text.y=element_text(size=10, lineheight=0.7), axis.text.x=element_text(size=10)) +
+  ggtitle("Fertile vs Non-fertile") +
+  scale_fill_gradient(low= "gray30", high="gray100");PhaseFdot 
+ggsave("FvNonFdot.pdf", PhaseFdot, height=8, width=8)
+```
+
+```{r}
+#ridgeplot
+PhaseFridge<-ridgeplot(gsea_PhaseF, showCategory=c("G protein-coupled receptor activity", "monoatomic ion channel complex", "positive regulation of inflammatory response", "phagocytic vesicle", "actin filament binding")) + labs(x = "enrichment distribution") + scale_fill_gradient(low= "gray30", high="gray100")+
+  theme(axis.text.y=element_text(size=11, lineheight=0.8), axis.text.x=element_text(size=10)); PhaseFridge
+
+ggsave("FvNonFdridge.pdf", PhaseFridge, height=3, width=6.5)
+```
+
+
+### Plot normalized counts of a couple genes!
+```{r}
+norm_counts<-voom_matrix$E
+TLR2_counts<-as.data.frame(norm_counts["TLR2",])
+colnames(TLR2_counts)<-c("norm_counts")
+TLR2_counts$Sample_ID<-rownames(TLR2_counts)
+TLR2_counts$gene<- "TLR2"
+addphase<-VagNoPostcoptop32[,c("Sample_ID", "phase")]
+TLR2_phase<-merge(TLR2_counts, addphase, by="Sample_ID")
+
+TLR2_phase$phase<-factor(TLR2_phase$phase, levels=c("non-fertile", "pre-fertile", "fertile", "post-fertile"))
+
+TLR2_plot<-ggplot(data=TLR2_phase, aes(x=phase, y=norm_counts)) +
+  geom_boxplot(aes(color=phase), outlier.shape=NA) +
+  geom_jitter(width=0.2, size=0.5, alpha=0.5)+
+    scale_color_manual(values=c("#0076BA", "#FEAE00" , "#FF644E", "#73BFFA")) +
+  theme_light() +
+  theme(legend.position="none", plot.title = element_text(hjust = 0.5, face="italic"), axis.text.x= element_text(angle=45, hjust=1, vjust=1, size=11)) +
+  ylab("normalized counts") +
+  xlab("") +
+  ggtitle("TLR2"); TLR2_plot
+
+ggsave("Phase_TLR2.pdf", TLR2_plot, width=2.3, height=3.5)
+```
+
+
+```{r}
+norm_counts<-voom_matrix$E
+SLC4A8_counts<-as.data.frame(norm_counts["SLC4A8",])
+colnames(SLC4A8_counts)<-c("norm_counts")
+SLC4A8_counts$Sample_ID<-rownames(SLC4A8_counts)
+SLC4A8_counts$gene<- "SLC4A8"
+addphase<-VagNoPostcoptop32[,c("Sample_ID", "phase")]
+SLC4A8_phase<-merge(SLC4A8_counts, addphase, by="Sample_ID")
+
+SLC4A8_phase$phase<-factor(SLC4A8_phase$phase, levels=c("non-fertile", "pre-fertile", "fertile", "post-fertile"))
+
+SLC4A8_plot<-ggplot(data=SLC4A8_phase, aes(x=phase, y=norm_counts)) +
+  geom_boxplot(aes(color=phase), outlier.shape=NA) +
+  geom_jitter(width=0.2, size=0.5, alpha=0.5)+
+    scale_color_manual(values=c("#0076BA", "#FEAE00" , "#FF644E", "#73BFFA")) +
+  theme_light() +
+  theme(legend.position="none", plot.title = element_text(hjust = 0.5, face="italic"), axis.text.x= element_text(angle=45, hjust=1, vjust=1, size=11)) +
+  ylab("normalized counts") +
+  xlab("") +
+  ggtitle("SLC4A8"); SLC4A8_plot
+
+ggsave("Phase_SLC4A8.pdf", SLC4A8_plot, width=2.3, height=3.5)
+```
