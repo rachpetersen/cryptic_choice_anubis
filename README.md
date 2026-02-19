@@ -2,8 +2,9 @@
 
 This project contains code for analyses and figures related to:
 
-Mechanisms of cryptic female choice in the vaginal tract of a primate species. 
+Evidence of genetically-based sperm discrimination in the vaginal tract of a primate species
 Rachel M. Petersen, Lee (Emily) M. Nonnamaker, Jaclyn Anderson, Christina Bergey, Christian Roos, Amanda D. Melin, and James P. Higham
+PLOS Biology, 2026
 
 Specifically, the scripts provided here are:
 
@@ -19,7 +20,7 @@ Specifically, the scripts provided here are:
 
   6. Semen_gene_analyses.Rmd: identifies genes overexpressed in semen samples and creates "semengenevector.txt" used to filter genes in postcopulatory DE analyses
 
-Data required as input for each script are hosted on Zenodo (10.5281/zenodo.14976902). The raw RNA-seq data (FASTQ files) are available on NCBI SRA at accession PRJNA1232174.
+Data required as input for each script are hosted on Zenodo (https://zenodo.org/records/14976902). The raw RNA-seq data (FASTQ files) are available on NCBI SRA at accession PRJNA1232174.
 
 Note that specific paths in the scripts will not work on your computer and you will need to change them accordingly.
 
