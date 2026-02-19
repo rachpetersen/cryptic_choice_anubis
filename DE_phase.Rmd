@@ -1,7 +1,7 @@
 ---
-title: "Aim 1: phase DE"
+title: "Untitled"
 output: html_document
-date: "2025-03-03"
+date: "2024-09-06"
 ---
 
 ```{r}
@@ -10,6 +10,10 @@ library(lattice)
 library(clusterProfiler)
 library(enrichplot)
 library(edgeR)
+library(ashr)
+library(data.table)
+library(ggVennDiagram)
+library(biomaRt)
 ```
 
 #load count data
@@ -19,10 +23,13 @@ counts <- as.data.frame(anubisfc$counts)
 colnames(counts)<-gsub(".anubis.useqs.merged.bam", "", colnames(counts)) 
 ```
 
-#Find best phase samples
+#load metadaata
 ```{r}
 CountsperSampleType<-read.csv("DE_sample_metadata.csv")
+```
 
+#Find best phase samples
+```{r}
 NotPostcop<-subset(CountsperSampleType, Postcop == "N")
 
 PreFertile<-subset(NotPostcop, phasecode == "PreF") 
@@ -54,7 +61,7 @@ VagNoPostcoptop32Phase <- as.vector(VagNoPostcoptop32$phasecode)
 countsnopostcop_top32 <- counts[,colnames(counts) %in% Top32$Sample_ID]
 ```
 
-#Create DGEList
+#Create DGEList (vaginal samples NO POSTCOP)
 ```{r}
 DGEList= NULL
 DGEList <- DGEList(counts=countsnopostcop_top32, genes=anubisfc$annotation[,c("GeneID","Length")], group=factor(VagNoPostcoptop32Phase))
@@ -66,7 +73,7 @@ keep <- rowSums(cpm(DGEList) > 10) >= 16
 FilteredDGEList <- DGEList[keep,]
 ```
 
-#Remove genes starting with "LOC"
+#Remove unplaced scaffolds (genes starting with "LOC")
 ```{r}
 FilteredDGEList$counts<- FilteredDGEList$counts[!grepl("LOC", rownames(FilteredDGEList$counts)), ]
 FilteredDGEList$genes<- FilteredDGEList$genes[!grepl("LOC", rownames(FilteredDGEList$genes)), ]
@@ -77,7 +84,6 @@ FilteredDGEList$genes<- FilteredDGEList$genes[!grepl("LOC", rownames(FilteredDGE
 FilteredDGEList$samples$lib.size <- colSums(FilteredDGEList$counts)
 ```
 
-
 ################
 # Differential expression analyses
 ################
@@ -86,71 +92,108 @@ FilteredDGEList$samples$lib.size <- colSums(FilteredDGEList$counts)
 #Create vectors with metadata information
 ```{r}
 VagNoPostcoptop32$phasecode <- relevel(as.factor(VagNoPostcoptop32$phasecode), ref = "NonF")
-VagNoPostcoptop32$male_status<-gsub(" ", "", VagNoPostcoptop32$male_status)
-MalePresence <- as.vector(VagNoPostcoptop32$male_status)
-RIN <- as.vector(VagNoPostcoptop32$RIN_RQN.y)
+VagNoPostcoptop32$male_presence<-gsub(" ", "", VagNoPostcoptop32$male_presence)
+MaleStatus <- as.vector(VagNoPostcoptop32$male_presence)
+RIN <- as.vector(VagNoPostcoptop32$RIN)
 FemaleID <- as.vector(VagNoPostcoptop32$FemaleID)
 ```
 
-#Run model
 ```{r}
 DGE_counts_norm <- calcNormFactors(FilteredDGEList)
-design <- model.matrix(~ VagNoPostcoptop32$phasecode + RIN + MalePresence)
+design <- model.matrix(~ VagNoPostcoptop32$phasecode + RIN + MaleStatus)
 colnames(design)[1:4] <- c("Intercept", "fertile", "postfertile", "prefertile")
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=FemaleID)
 fit <- lmFit(voom_matrix, design, block=FemaleID, correlation=dupcor$consensus)
-fit<- eBayes(fit) # runs the linear model
+fit2<- eBayes(fit, robust = TRUE) # runs the linear model
 ```
 
 
-#See results: fertile v nonfertile
+##fertile v nonfertile results
 ```{r}
-coeff<- as.data.frame(fit$coeff[,2])
-pvalues<- as.data.frame(fit$p.value[,2])
-qvalues<- as.data.frame(apply(fit$p.value, 2, function(x)p.adjust(x, method="fdr"))[,2])
+beta <- fit2$coefficients[, "fertile"]
+se <- fit2$stdev.unscaled[, "fertile"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "fertile"]
 
-FvNonF<-cbind(coeff, pvalues, qvalues)
-colnames(FvNonF)<- c("coeff", "pvalue", "qvalue")
-sig<-subset(FvNonF, qvalue < 0.1); dim(sig) 
+#run ashr to shrink model estimates
+ash_fit <- ash(beta, se)
+
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd <- as.data.frame(get_psd(ash_fit))
+lfsr <- as.data.frame(get_lfsr(ash_fit))
+
+FvNonF<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(FvNonF)<- c("pm", "SE", "lfsr")
+rownames(FvNonF)<-rownames(fit2)
+
+#filter for significant genes
+sig<-subset(FvNonF, lfsr < 0.1); dim(sig)
+sig5<-subset(lfsr, get_lfsr(ash_fit) < 0.05);nrow(sig5) 
+sig01<-subset(lfsr, get_lfsr(ash_fit) < 0.01); nrow(sig01) 
 
 Fertile_sig_genes<- sig
 Fertile_sig_genes$Gene<-rownames(Fertile_sig_genes)
 Fertile_sig_genes$comparison<-"FvNonF"
 ```
 
-#prefertile v nonfertile
+##prefertile v nonfertile results
 ```{r}
-coeff<- as.data.frame(fit$coeff[,4])
-pvalues<- as.data.frame(fit$p.value[,4])
-qvalues<- as.data.frame(apply(fit$p.value, 2, function(x)p.adjust(x, method="fdr"))[,4])
+beta <- fit2$coefficients[, "prefertile"]
+se <- fit2$stdev.unscaled[, "prefertile"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "prefertile"]
 
-PreFvNonF<-cbind(coeff, pvalues, qvalues)
-colnames(PreFvNonF)<- c("coeff", "pvalue", "qvalue")
-sig<-subset(PreFvNonF, qvalue < 0.1); dim(sig) 
+#run ashr to shrink model estimates
+ash_fit <- ash(beta, se)
+
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd <- as.data.frame(get_psd(ash_fit))
+lfsr <- as.data.frame(get_lfsr(ash_fit))
+
+PreFvNonF<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(PreFvNonF)<- c("pm", "SE", "lfsr")
+rownames(PreFvNonF)<-rownames(fit2)
+
+#filter for significant genes
+sig<-subset(PreFvNonF, lfsr < 0.1); dim(sig) 
+sig5<-subset(lfsr, get_lfsr(ash_fit) < 0.05);nrow(sig5) 
+sig01<-subset(lfsr, get_lfsr(ash_fit) < 0.01); nrow(sig01) 
 
 Prefertile_sig_genes<- sig
 Prefertile_sig_genes$Gene<-rownames(Prefertile_sig_genes)
 Prefertile_sig_genes$comparison<-"PreFvNonF"
 ```
 
-#postfertile v nonfertile
+#prefertile v nonfertile results
 ```{r}
-coeff<- as.data.frame(fit$coeff[,3])
-pvalues<- as.data.frame(fit$p.value[,3])
-qvalues<- as.data.frame(apply(fit$p.value, 2, function(x)p.adjust(x, method="fdr"))[,3])
+beta <- fit2$coefficients[, "postfertile"]
+se <- fit2$stdev.unscaled[, "postfertile"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "postfertile"]
 
-PostFvNonF<-cbind(coeff, pvalues, qvalues)
-colnames(PostFvNonF)<- c("coeff", "pvalue", "qvalue")
-sig<-subset(PostFvNonF, qvalue < 0.1); dim(sig) 
+#run ashr to shrink model estimates
+ash_fit <- ash(beta, se)
+
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd <- as.data.frame(get_psd(ash_fit))
+lfsr <- as.data.frame(get_lfsr(ash_fit))
+
+PostFvNonF<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(PostFvNonF)<- c("pm", "SE", "lfsr")
+rownames(PostFvNonF)<-rownames(fit2)
+
+#filter for significant genes
+sig<-subset(PostFvNonF, lfsr < 0.1); dim(sig) 
+sig5<-subset(lfsr, get_lfsr(ash_fit) < 0.05);nrow(sig5) 
+sig01<-subset(lfsr, get_lfsr(ash_fit) < 0.01); nrow(sig01) 
 
 Postfertile_sig_genes<- sig
 Postfertile_sig_genes$Gene<-rownames(Postfertile_sig_genes)
 Postfertile_sig_genes$comparison<-"PostFvNonF"
 ```
 
-
-#make contrasts to get other pairwise comparisons
+#rescale contrasts
 ```{r}
 contrast.matrix <- makeContrasts(
   prefertile_v_fertile = prefertile - fertile,
@@ -159,60 +202,107 @@ contrast.matrix <- makeContrasts(
   levels = design
 )
 
-fit2 <- eBayes(contrasts.fit(fit, contrast.matrix))
-
+fit2 <- eBayes(contrasts.fit(fit, contrast.matrix), robust=TRUE)
 ```
 
-#prefertile v fertile
+#prefertile v fertile results
 ```{r}
+beta <- fit2$coefficients[, "prefertile_v_fertile"]
+se <- fit2$stdev.unscaled[, "prefertile_v_fertile"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "prefertile_v_fertile"]
 
-coeff<- as.data.frame(fit2$coeff[,1])
-pvalues<- as.data.frame(fit2$p.value[,1])
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr"))[,1])
+#run ashr to shrink model estimates
+ash_fit <- ash(beta, se)
 
-PreFvF<-cbind(coeff, pvalues, qvalues)
-colnames(PreFvF)<- c("coeff", "pvalue", "qvalue")
-PreFvF_sig<-subset(PreFvF, qvalue < 0.1); dim(PreFvF_sig) 
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd <- as.data.frame(get_psd(ash_fit))
+lfsr <- as.data.frame(get_lfsr(ash_fit))
+
+PreFvF<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(PreFvF)<- c("pm", "SE", "lfsr")
+rownames(PreFvF)<-rownames(fit2)
+
+#filter for significant genes
+sig<-subset(PreFvF, lfsr < 0.1); dim(sig) 
+sig5<-subset(lfsr, get_lfsr(ash_fit) < 0.05);nrow(sig5) 
+sig01<-subset(lfsr, get_lfsr(ash_fit) < 0.01); nrow(sig01)
+
+PreFvF_sig<- sig
 PreFvF_sig$Gene<-rownames(PreFvF_sig)
 PreFvF_sig$comparison<-"PreFvF"
 ```
 
-#prefertile v postfertile
 ```{r}
-coeff<- as.data.frame(fit2$coeff[,2])
-pvalues<- as.data.frame(fit2$p.value[,2])
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr"))[,2])
+#prefertile v postfertile
+beta <- fit2$coefficients[, "prefertile_v_postfertile"]
+se <- fit2$stdev.unscaled[, "prefertile_v_postfertile"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "prefertile_v_postfertile"]
 
-PreFvPostF<-cbind(coeff, pvalues, qvalues)
-colnames(PreFvPostF)<- c("coeff", "pvalue", "qvalue")
-PreFvPostF_sig<-subset(PreFvPostF, qvalue < 0.1); dim(PreFvPostF_sig) 
+#run ashr to shrink model estimates
+ash_fit <- ash(beta, se)
+
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd <- as.data.frame(get_psd(ash_fit))
+lfsr <- as.data.frame(get_lfsr(ash_fit))
+
+PreFvPostF<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(PreFvPostF)<- c("pm", "SE", "lfsr")
+rownames(PreFvPostF)<-rownames(fit2)
+
+#filter for significant genes
+sig<-subset(PreFvPostF, lfsr < 0.1); dim(sig) #2537
+sig5<-subset(lfsr, get_lfsr(ash_fit) < 0.05);nrow(sig5) #2403
+sig01<-subset(lfsr, get_lfsr(ash_fit) < 0.01); nrow(sig01) #2174
+
+PreFvPostF_sig<- sig
 PreFvPostF_sig$Gene<-rownames(PreFvPostF_sig)
 PreFvPostF_sig$comparison<-"PreFvPostF"
 ```
 
-#fertile v postfertile
+#fertile v postfertile results
 ```{r}
-coeff<- as.data.frame(fit2$coeff[,3])
-pvalues<- as.data.frame(fit2$p.value[,3])
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr"))[,3])
+beta <- fit2$coefficients[, "fertile_v_postfertile"]
+se <- fit2$stdev.unscaled[, "fertile_v_postfertile"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "fertile_v_postfertile"]
 
-FvPostF<-cbind(coeff, pvalues, qvalues)
-colnames(FvPostF)<- c("coeff", "pvalue", "qvalue")
-FvPostF_sig<-subset(FvPostF, qvalue < 0.1); dim(FvPostF_sig) 
+#run ashr to shrink model estimates
+ash_fit <- ash(beta, se)
+
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd <- as.data.frame(get_psd(ash_fit))
+lfsr <- as.data.frame(get_lfsr(ash_fit))
+
+FvPostF<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(FvPostF)<- c("pm", "SE", "lfsr")
+rownames(FvPostF)<-rownames(fit2)
+
+#filter for significant genes
+sig<-subset(FvPostF, lfsr < 0.1); dim(sig)
+sig5<-subset(lfsr, get_lfsr(ash_fit) < 0.05);nrow(sig5) 
+sig01<-subset(lfsr, get_lfsr(ash_fit) < 0.01); nrow(sig01) 
+
+FvPostF_sig<- sig
 FvPostF_sig$Gene<-rownames(FvPostF_sig)
 FvPostF_sig$comparison<-"FvPostF"
 ```
 
+
+
 #Write table of all results
 ```{r}
 Allcomparisons<-do.call(rbind, list(Fertile_sig_genes, Prefertile_sig_genes, Postfertile_sig_genes, PreFvF_sig, PreFvPostF_sig, FvPostF_sig))
-write.table(Allcomparisons, "DE_results_phase.txt", quote=F, row.names=F, col.names=T, sep="\t")
+
+write.table(Allcomparisons, "20Nov25_DE_results_phase.txt", quote=F, row.names=F, col.names=T, sep="\t")
 ```
 
-#visualize 
+
+
+#### Heatmap of number of DE genes (Figure 1B)
 ```{r}
-## Heatmap of number of DE genes
-DE_genes <- data.frame(V1=c("non-fertile", "non-fertile", "non-fertile", "pre-fertile", "pre-fertile", "fertile"), V2=c("pre-fertile", "fertile", "post-fertile", "fertile", "post-fertile", "post-fertile"), value=c(2390, 2481, 2111, 8, 58, 757))
+DE_genes <- data.frame(V1=c("non-fertile", "non-fertile", "non-fertile", "pre-fertile", "pre-fertile", "fertile"), V2=c("pre-fertile", "fertile", "post-fertile", "fertile", "post-fertile", "post-fertile"), value=c(nrow(Prefertile_sig_genes), nrow(Fertile_sig_genes), nrow(Postfertile_sig_genes), nrow(PreFvF_sig), nrow(PreFvPostF_sig), nrow(FvPostF_sig)))
 
 ordered_phases<-c("non-fertile", "pre-fertile", "fertile", "post-fertile")
 
@@ -228,25 +318,26 @@ DEphase_heatmap<-ggplot(data=DE_genes, aes(x=V1, y=V2, fill=value)) +
   labs(x = "", y = "", fill = "DE genes") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, size=14, color="black"), axis.text.y = element_text(size=14, color="black"), legend.position = "right"); DEphase_heatmap
 
-ggsave("DEphase_heatmap.pdf", DEphase_heatmap, width=4, height=4)
+ggsave("DEphase_heatmap_R1.pdf", DEphase_heatmap, width=4, height=4)
 ```
 
+
+#venn diagram (Figure 1C)
 ```{r}
-#venn diagram
-
-library(ggVennDiagram)
-
 data <- list(
   Fertile = Fertile_sig_genes$Gene,
   "Pre-fertile" = Prefertile_sig_genes$Gene,
   "Post-fertile" = Postfertile_sig_genes$Gene
 )
+```
 
+```{r}
 DE_venn<-ggVennDiagram(data, 
               label = "count", 
               set_color = c("#FEAE00","#FF644E", "#73BFFA"),
               set_size = 7,
               label_size = 6,
+              label_alpha=0,
               edge_size = 2,
               category.names = c("Pre-fertile", "Fertile", "\nPost-fertile")) +
   scale_fill_gradient(low="white", high="white")+
@@ -255,25 +346,20 @@ DE_venn<-ggVennDiagram(data,
   scale_y_continuous(expand = expansion(mult = .2)) +
   theme(legend.position="none"); DE_venn
     
-ggsave("DE_venn.pdf", DE_venn, width=4, height=4)
+    
+ggsave("DE_venn_R1.pdf", DE_venn, width=4, height=4)
+  
 ```
 
 
-
+#Gene Set Enrichment Analysis
 ################
 # GSEA
 ################
 
-
 ```{r}
-library(clusterProfiler)
-library(enrichplot)
-library(biomaRt)
-```
-
-```{r}
-# Connect to Ensembl BioMart and select Papio anubis
-ensembl <- useMart("ensembl", dataset = "panubis_gene_ensembl")  
+# Connect to Ensembl BioMart and select your organism (e.g., Papio anubis)
+ensembl <- useMart("ensembl", dataset = "panubis_gene_ensembl") 
 
 # Retrieve GO term annotations for your genes
 go_annotations <- getBM(attributes = c("external_gene_name", "go_id", "name_1006"),
@@ -288,14 +374,22 @@ TERM2NAME <- unique(go_annotations[, c("go_id", "name_1006")])
 
 
 ```{r}
-coeff_gsea<-as.data.frame(fit$coefficients)
-coeff_gsea$geneID<-rownames(coeff_gsea)
+design <- model.matrix(~ VagNoPostcoptop32$phasecode + RIN + MaleStatus)
+colnames(design)[1:4] <- c("Intercept", "fertile", "postfertile", "prefertile")
+voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
+dupcor <- duplicateCorrelation(voom_matrix, design, block=FemaleID)
+fit <- lmFit(voom_matrix, design, block=FemaleID, correlation=dupcor$consensus)
+fit2<- eBayes(fit, robust = TRUE) # runs the linear model
+
+coeff_play<-as.data.frame(fit2$coefficients)
+coeff_play$geneID<-rownames(coeff_play)
+write.table(voom_matrix$E, "phase_normcounts.txt", quote=F, sep="\t")
 ```
 
-#Fertile v non-fertile phase
+#Fertile phase
 ```{r}
-original_PhaseF_gene_list <- (coeff_gsea$fertile)
-names(original_PhaseF_gene_list) <- coeff_gsea$geneID
+original_PhaseF_gene_list <- (coeff_play$fertile)
+names(original_PhaseF_gene_list) <- coeff_play$geneID
 PhaseF_gene_list<-na.omit(original_PhaseF_gene_list)
 PhaseF_gene_list = sort( (PhaseF_gene_list), decreasing = TRUE)
 
@@ -314,28 +408,32 @@ gsea_PhaseF <- GSEA(
 write.table(gsea_PhaseF@result, "gsea_PhaseF.txt", quote=F, row.names=F, col.names=T, sep="\t")
 ```
 
-#Visualize
 ```{r}
-#dotplot
-PhaseFdot<-dotplot(gsea_PhaseF, showCategory=20, color="p.adjust", split=".sign") + facet_grid(.~.sign) +
-  theme(strip.text=element_text(size=15), axis.text.y=element_text(size=10, lineheight=0.7), axis.text.x=element_text(size=10)) +
+#Figure S1
+gsea_PhaseF@result<-subset(gsea_PhaseF@result, Description != "")
+
+PhaseFdot<-dotplot(gsea_PhaseF, showCategory=10, color="p.adjust", split=".sign") + facet_grid(. ~ .sign) +
+  theme(axis.text.y=element_text(size=10, lineheight=0.7), axis.text.x=element_text(size=10)) +
   ggtitle("Fertile vs Non-fertile") +
   scale_fill_gradient(low= "gray30", high="gray100");PhaseFdot 
 ggsave("FvNonFdot.pdf", PhaseFdot, height=8, width=8)
 ```
 
+
 ```{r}
-#ridgeplot
-PhaseFridge<-ridgeplot(gsea_PhaseF, showCategory=c("G protein-coupled receptor activity", "monoatomic ion channel complex", "positive regulation of inflammatory response", "phagocytic vesicle", "actin filament binding")) + labs(x = "enrichment distribution") + scale_fill_gradient(low= "gray30", high="gray100")+
+#Figure 1D
+PhaseFridge<-ridgeplot(gsea_PhaseF, showCategory=c("G protein-coupled receptor activity", "monoatomic ion channel complex", "inflammatory response", "phagocytic vesicle", "regulation of cell adhesion")) + labs(x = "enrichment distribution") + scale_fill_gradient(low= "gray30", high="gray100")+
   theme(axis.text.y=element_text(size=11, lineheight=0.8), axis.text.x=element_text(size=10)); PhaseFridge
 
 ggsave("FvNonFdridge.pdf", PhaseFridge, height=3, width=6.5)
 ```
 
 
-### Plot normalized counts of a couple genes!
+### normalized counts of a couple genes!
 ```{r}
+#Figure 1E
 norm_counts<-voom_matrix$E
+#normalized counts can also be found in S1 Data
 TLR2_counts<-as.data.frame(norm_counts["TLR2",])
 colnames(TLR2_counts)<-c("norm_counts")
 TLR2_counts$Sample_ID<-rownames(TLR2_counts)
@@ -358,8 +456,8 @@ TLR2_plot<-ggplot(data=TLR2_phase, aes(x=phase, y=norm_counts)) +
 ggsave("Phase_TLR2.pdf", TLR2_plot, width=2.3, height=3.5)
 ```
 
-
 ```{r}
+#Figure 1F
 norm_counts<-voom_matrix$E
 SLC4A8_counts<-as.data.frame(norm_counts["SLC4A8",])
 colnames(SLC4A8_counts)<-c("norm_counts")

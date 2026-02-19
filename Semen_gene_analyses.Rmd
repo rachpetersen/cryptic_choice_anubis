@@ -1,0 +1,67 @@
+---
+title: "Semen_genes"
+author: "Rachel"
+date: "11/12/2021"
+output: html_document
+---
+
+```{r}
+library(edgeR)
+library(Rsubread)
+library(dplyr)
+library(tidyverse)
+library(org.Hs.eg.db)
+```
+
+```{r}
+load("anubisfc_R1_multimapped.Rdata")
+```
+
+```{r}
+counts_R1 <- as.data.frame(anubisfc$counts)
+
+countstidy_R1 <- counts_R1 %>%
+  rename_at(vars(matches(".anubis.useqs.merged.bam")), ~str_remove(., ".anubis.useqs.merged.bam"))
+
+countssemen_R1 <- countstidy_R1 %>%
+  dplyr::select(c("401", "402", "411A", "412", "421", "422", "431", "432"))
+
+```
+
+
+## Identify highly expressed genes in semen
+
+Create DGEList (ONLY semen samples)
+```{r}
+DGEList = NULL
+DGEList <- DGEList(counts=countssemen_R1, genes=anubisfc$annotation[,c("GeneID","Length")])
+```
+
+```{r}
+cpmsemen <- as.data.frame((rowSums(cpm(DGEList)))/8)
+highexpr <- cpmsemen %>%
+  dplyr::rename(cpm= "(rowSums(cpm(DGEList)))/8") %>%
+  filter(cpm > 20) 
+
+highexpr$genes <- rownames(highexpr)
+
+semengenestoremove <- highexpr %>%
+  filter(!grepl("LOC",genes)) 
+write.table(semengenestoremove, "semengenestoremove_29Jan25.txt", quote=F, row.names=F, sep="\t")
+
+semengenevector <- as.vector(semengenestoremove$genes)
+write.table(semengenevector, "semengenevector.txt")
+```
+
+```{r}
+cols<- c("SYMBOL","GENENAME")
+SemenGeneInfo <- AnnotationDbi::select(org.Hs.eg.db, keys=semengenevector, columns=cols, keytype="SYMBOL")
+```
+
+```{r}
+SemenTable <- left_join(semengenestoremove, SemenGeneInfo, by.x="genes", by.y="SYMBOL")
+```
+
+```{r}
+write.csv(SemenTable, "SemenGeneTable.csv")
+```

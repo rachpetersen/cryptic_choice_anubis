@@ -1,11 +1,18 @@
 ---
-title: 'Aim 2: postcop DE'
+title: "6Sept24_DE_postcop"
 output: html_document
-date: "2025-03-05"
+date: "2024-09-07"
 ---
 
 ```{r}
 library(tidyverse)
+library(lattice)
+library(clusterProfiler)
+library(enrichplot)
+library(edgeR)
+library(ashr)
+library(pheatmap)
+library(RColorBrewer)
 ```
 
 #load count data 
@@ -26,14 +33,12 @@ Postcop_5M <- Postcop %>%
   dplyr::filter(uniquely_mapped_total > 5000000) %>%
   filter(phasecode == "F" | phasecode == "PreF" | phasecode == "PostF") %>%
   group_by(FemaleID)
-#25 samples from 6 different females
 
 Noncop_5M <- CountsperSampleType %>%
   filter(Postcop == "N") %>%
   filter(phasecode == "F" | phasecode == "PreF" | phasecode == "PostF") %>%
   filter(uniquely_mapped_total > 5000000) %>%
   filter(FemaleID %in% Postcop_IDs) 
-#30 samples from those same females
 
 Postcop_DE_samples<-rbind(Postcop_5M, Noncop_5M)
 Postcop_DE_samplesPostcop <- as.vector(Postcop_DE_samples$Postcop)
@@ -44,7 +49,8 @@ Postcop_DE_samplesPostcop <- as.vector(Postcop_DE_samples$Postcop)
 countspostcop_de <- counts[,Postcop_DE_samples$Sample_ID]
 ```
 
-#Create DGEList
+
+#Create DGEList (Postcop + PreF and F noncop)
 ```{r}
 DGEList= NULL
 DGEList <- DGEList(counts=countspostcop_de, genes=anubisfc$annotation[,c("GeneID","Length")], group=factor(Postcop_DE_samplesPostcop))
@@ -53,11 +59,10 @@ DGEList <- DGEList(counts=countspostcop_de, genes=anubisfc$annotation[,c("GeneID
 #Remove low expressed genes (>10cpm in at least half of samples)
 ```{r}
 keep <- rowSums(cpm(DGEList) > 10) >= 28
-
 FilteredDGEList <- DGEList[keep,]
 ```
 
-#Remove genes starting with "LOC"
+#Remove unplaced scaffolds (genes starting with "LOC")
 ```{r}
 FilteredDGEList$counts<- FilteredDGEList$counts[!grepl("LOC", rownames(FilteredDGEList$counts)), ]
 FilteredDGEList$genes<- FilteredDGEList$genes[!grepl("LOC", rownames(FilteredDGEList$genes)), ]
@@ -65,7 +70,7 @@ FilteredDGEList$genes<- FilteredDGEList$genes[!grepl("LOC", rownames(FilteredDGE
 
 #Remove genes that are highly expressed in semen
 ```{r}
-semengenevector<- read.table("semengenevector_19Jan25.txt")$x
+semengenevector<- read.table("semengenevector_19Jan25.txt")
 FilteredDGEList <- FilteredDGEList[!rownames(FilteredDGEList) %in% semengenevector, ]
 ```
 
@@ -85,42 +90,63 @@ FilteredDGEList$samples$lib.size <- colSums(FilteredDGEList$counts)
 Postcop <- as.vector(Postcop_DE_samples$Postcop)
 Phase <- as.vector(Postcop_DE_samples$phasecode)
 Postcop_DE_samples$male_presence<-gsub(" ", "", Postcop_DE_samples$male_presence)
-MalePresence <- as.vector(Postcop_DE_samples$male_presence)
+MaleStatus <- as.vector(Postcop_DE_samples$male_presence)
 RIN <- as.vector(Postcop_DE_samples$RIN)
-FemaleID <- as.vector(Postcop_DE_samples$FemaleID)
-MaleID<-as.vector(Postcop_DE_samples$MaleID)
 DyadID<-as.factor(as.vector(Postcop_DE_samples$DyadID))
 ```
 
-#Run model
 ```{r}
 DGE_counts_norm <- calcNormFactors(FilteredDGEList)
-design <- model.matrix(~ Postcop + RIN + MalePresence + Phase)
+design <- model.matrix(~ Postcop + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)# runs the linear model
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
 ```
 
-#See results
 ```{r}
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
-
-PostcopNvY<-as.data.frame(cbind(coeff$PostcopY, pvalues$PostcopY, qvalues$PostcopY))
-colnames(PostcopNvY)<- c("coeff", "pvalue", "qvalue")
-PostcopNvY$Gene<-rownames(fit2)
-sig<-subset(PostcopNvY, qvalue < 0.1); dim(sig) 
-
-upreg<-subset(sig, coeff > 0); dim(upreg)
-downreg<-subset(sig, coeff < 0); dim(downreg)
+write.table(voom_matrix$E, "postcop_normcounts.txt", sep="\t", quote=F)
 ```
 
 
+#model results
+```{r}
+beta <- fit2$coefficients[, "PostcopY"]
+se <- fit2$stdev.unscaled[, "PostcopY"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY"]
+
+#run ashr to shrink estimates
+ash_fit <- ash(beta, se)
+
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd <- as.data.frame(get_psd(ash_fit))
+lfsr <- as.data.frame(get_lfsr(ash_fit))
+
+postcopy<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(postcopy)<- c("pm", "SE", "lfsr")
+rownames(postcopy)<-rownames(fit2)
+
+#subset to significant genes
+sig<-subset(postcopy, lfsr < 0.1); dim(sig) #
+sig5<-subset(lfsr, get_lfsr(ash_fit) < 0.05);nrow(sig5) #715
+sig01<-subset(lfsr, get_lfsr(ash_fit) < 0.01); nrow(sig01) #383
+
+sig$Gene<-rownames(sig)
+write.table(sig, "20Nov25_DE_results_postcop.txt", quote=F, row.names=F, col.names=T, sep="\t")
+```
+
+
+#Gene Set Enrichment Analysis
 ################
 # GSEA
 ################
+
+```{r}
+#BiocManager::install("enrichplot")
+#BiocManager::install("clusterProfiler")
+```
+
 
 ```{r}
 library(clusterProfiler)
@@ -129,10 +155,10 @@ library(biomaRt)
 ```
 
 ```{r}
-# Connect to Ensembl BioMart and select Papio anubis
-ensembl <- useMart("ensembl", dataset = "panubis_gene_ensembl")  
+# Connect to Ensembl BioMart and select your organism (e.g., Papio anubis)
+ensembl <- useEnsembl("ensembl", dataset = "panubis_gene_ensembl", mirror = "useast") 
 
-# Retrieve GO term annotations for genes
+# Retrieve GO term annotations for your genes
 go_annotations <- getBM(attributes = c("external_gene_name", "go_id", "name_1006"),
                         mart = ensembl)
 
@@ -143,17 +169,19 @@ TERM2GENE <- go_annotations[, c("go_id", "external_gene_name")]
 TERM2NAME <- unique(go_annotations[, c("go_id", "name_1006")])
 ```
 
-#format data
+
 ```{r}
-coeff_gsea<-as.data.frame(fit2$coeff)
-coeff_gsea$geneID<-rownames(coeff_gsea)
-original_PostcopY_gene_list <- (coeff_gsea$PostcopY)
-names(original_PostcopY_gene_list) <- coeff_gsea$geneID
+coeff_play<-as.data.frame(fit2$coeff)
+coeff_play$geneID<-rownames(coeff_play)
+```
+
+```{r}
+original_PostcopY_gene_list <- (coeff_play$PostcopY)
+names(original_PostcopY_gene_list) <- coeff_play$geneID
 PostcopY_gene_list<-na.omit(original_PostcopY_gene_list)
 PostcopY_gene_list = sort( (PostcopY_gene_list), decreasing = TRUE)
 ```
 
-#run GSEA
 ```{r}
 gsea_PostcopY <- GSEA(
   geneList = PostcopY_gene_list,
@@ -165,48 +193,33 @@ gsea_PostcopY <- GSEA(
 
 #save results
 ```{r}
-write.table(gsea_PostcopY@result, "gsea_Postcop.txt", quote=F, row.names=F, col.names=T, sep="\t")
+foldchange_df <- data.frame(
+  gene = names(PostcopY_gene_list),
+  fold_change = PostcopY_gene_list
+)
+
+write.table(foldchange_df, "PostcopY_cnetplot_foldchanges.txt", quote=F, sep="\t")
+write.table(gsea_PostcopY@result, "gsea_Postcop_robust.txt", quote=F, row.names=F, col.names=T, sep="\t")
 ```
 
-#visualize
-
 ```{r}
-#dotplot
-PostcopYdot<-dotplot(gsea_PostcopY, split=".sign") + facet_grid(.~.sign) +
-    scale_fill_gradient(high="black", low="gray")+
-  labs(x = "enrichment distribution") +
-  theme(strip.text=element_text(size=15), axis.text.y=element_text(size=11, lineheight=0.8), axis.text.x=element_text(size=10)); PostcopYdot
-ggsave("PostcopYdot.pdf", PostcopYdot, height=5, width=6)
+Postcop_cnet<-cnetplot(gsea_PostcopY, layout= "kk", showCategory=c("inflammatory response", "cellular response to lipopolysaccharide"), foldChange=PostcopY_gene_list, color_category = "gray40") +
+  scale_color_gradient(low="gray80", high="#76D6FF");Postcop_cnet
 
-#ridgeplot
-Postcop_ridgeplot<-ridgeplot(gsea_PostcopY) + 
-  scale_fill_gradient(high="black", low="gray")+
-  labs(x = "enrichment distribution") +
-  theme(axis.text.y=element_text(size=11, lineheight=0.8), axis.text.x=element_text(size=10)); Postcop_ridgeplot
-
-#cnet
-Postcop_cnet<-cnetplot(gsea_PostcopY, layout= "kk", showCategory=c("positive regulation of inflammatory response", "cellular response to lipopolysaccharide"), 
-                       cex.params = list(gene_label = 0.7, category_label=1, gene_node = 2), 
-                       color.params = list(foldChange = PostcopY_gene_list, category = "gray40")) +
-  scale_color_gradient(low="gray90", high="#76D6FF"); Postcop_cnet
-ggsave("29Jan25_Postcop_cnet_plot.pdf", Postcop_cnet, width=7, height=4)
+ggsave("18Nov25_Postcop_cnet_plot.pdf", Postcop_cnet, width=7, height=4)
 ```
 
-
-## Make a heatmap of genes that are part of 2 immune GO terms
+## Make a heatmap of genes that are part of those GO terms
 ```{r}
-library(pheatmap)
-library(RColorBrewer)
+immune_genes<-c("IL1RN","MAP2K3","BCL6","NFKBIA","NCF1","PIK3CD","ADAM8","CMKLR1","MEFV","NAMPT","TLR2","TNFAIP3", "CXCL8","AIM2","CD14","S100A9","TNIP1","NFKBIZ","TCIRG1","IL1B","TLR1", "SLC11A1","FOXP3","TLR6","NAGLU", "ZFP36", "RARA", "MAPK14", "NOD2", "JAK2", "IRAK3") 
 
-postcop_immune_go<-c("GO:0050729", "GO:0071222")
-
-immune_genes<-c("ZFP36","TNFAIP3","CXCL8","CD14","NFKBIZ","RARA","JAK2","MAPK14", "NOD2", "NFKBIA","ADAM8","TLR2","OSM","S100A9","NFKBIZ","STAT5B","IL1B")
+sig_immune_genes<-subset(sig, rownames(sig) %in% immune_genes) %>%
+  unique()
 
 norm_counts<-voom_matrix$E
 fitted_counts<-fitted(fit2)
 colnames(fitted_counts)<- colnames(norm_counts)
-
-immune_gene_resid<-as.data.frame(fitted_counts[rownames(fitted_counts) %in% immune_genes,])
+immune_gene_resid<-as.data.frame(fitted_counts[rownames(fitted_counts) %in% rownames(sig_immune_genes),])
 immune_gene_resid_reversed <- immune_gene_resid[, rev(colnames(immune_gene_resid))]
 
 Sig_immune_genes_heatmap<-pheatmap(immune_gene_resid_reversed,
@@ -217,12 +230,15 @@ Sig_immune_genes_heatmap<-pheatmap(immune_gene_resid_reversed,
          scale="row",
          show_colnames=FALSE); Sig_immune_genes_heatmap
 
-ggsave("Sig_immune_genes_heatmap.pdf", Sig_immune_genes_heatmap, width=6, height=3.5)
+ggsave("18Nov25_Sig_immune_genes_heatmap.pdf", Sig_immune_genes_heatmap, width=6, height=3.5)
+
+write.table(fitted_counts, "postcop_fittedcounts.txt", quote=F, sep="\t")
 ```
 
 
-# plot genes that are upreg in postcop samples
+# plot gene that is upreg in postcop samples
 ```{r}
+#Figure 2C
 #TLR2
 norm_counts<-voom_matrix$E
 TLR2_counts<-as.data.frame(norm_counts["TLR2",])
@@ -244,4 +260,5 @@ TLR2_plot<-ggplot(data=TLR2_counts, aes(x=Postcop, y=norm_counts)) +
   ggtitle("TLR2"); TLR2_plot
 
 ggsave("Postcop_TLR2.pdf", TLR2_plot, width=2.3, height=3)
+
 ```

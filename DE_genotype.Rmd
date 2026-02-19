@@ -1,12 +1,18 @@
 ---
-title: 'Aim 3: genotype DE'
+title: "Untitled"
 output: html_document
-date: "2025-03-07"
+date: "2024-09-13"
 ---
 
 ```{r}
 library(tidyverse)
+library(qqman)
+library(clusterProfiler)
+library(enrichplot)
+library(biomaRt)
+library(ggVennDiagram)
 ```
+
 
 #load count data
 ```{r}
@@ -15,7 +21,6 @@ counts <- as.data.frame(anubisfc$counts)
 colnames(counts)<-gsub(".anubis.useqs.merged.bam", "", colnames(counts)) 
 ```
 
-#Find best postcop samples
 ```{r}
 CountsperSampleType<-read.csv("DE_sample_metadata.csv")
 Postcop<-subset(CountsperSampleType, Postcop == "Y")
@@ -54,7 +59,7 @@ keep <- rowSums(cpm(DGEList) > 10) >= 28
 FilteredDGEList <- DGEList[keep,]
 ```
 
-#Remove genes starting with "LOC"
+Remove genes starting with "LOC"
 ```{r}
 FilteredDGEList$counts<- FilteredDGEList$counts[!grepl("LOC", rownames(FilteredDGEList$counts)), ]
 FilteredDGEList$genes<- FilteredDGEList$genes[!grepl("LOC", rownames(FilteredDGEList$genes)), ]
@@ -64,6 +69,7 @@ FilteredDGEList$genes<- FilteredDGEList$genes[!grepl("LOC", rownames(FilteredDGE
 ```{r}
 semengenes<- read.table("semengenevector_19Jan25.txt")
 semengenevector <- as.vector(semengenes[,1])
+
 FilteredDGEList <- FilteredDGEList[!rownames(FilteredDGEList) %in% semengenevector, ]
 ```
 
@@ -73,51 +79,51 @@ FilteredDGEList$samples$lib.size <- colSums(FilteredDGEList$counts)
 ```
 
 
-
-################
-# Differential expression analyses
-################
-
+## Differential expression analyses
 
 #Create vectors with metadata information
 ```{r}
 Postcop <- as.vector(Postcop_DE_samples$Postcop)
 Phase <- as.vector(Postcop_DE_samples$phasecode)
 Postcop_DE_samples$male_presence<-gsub(" ", "", Postcop_DE_samples$male_presence)
-MalePresence <- as.vector(Postcop_DE_samples$male_presence)
+MaleStatus <- as.vector(Postcop_DE_samples$male_presence)
 RIN <- as.vector(Postcop_DE_samples$RIN)
-FemaleID <- as.vector(Postcop_DE_samples$FemaleID)
-MaleID<-as.vector(Postcop_DE_samples$MaleID)
 DyadID<-as.factor(as.vector(Postcop_DE_samples$DyadID))
 ```
 
 
-############## Measures of male diversity #################
-
-```{r}
-DGE_counts_norm <- calcNormFactors(FilteredDGEList)
-```
+############## Measures of heterozygosity #################
 
 
 ## Male stMLH ##
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$Male_stMLH)
-design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
+``` 
 
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
+```{r}
+#apply ashr 
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+ash_fit <- ash(beta, se)
 
-stMLH_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(stMLH_int)<- c("coeff", "pvalue", "qvalue")
-rownames(stMLH_int)<-rownames(fit2)
-sig_interaction_stMLH<-subset(stMLH_int, qvalue < 0.1); dim(sig_interaction_stMLH) 
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd <- as.data.frame(get_psd(ash_fit))
+lfsr <- as.data.frame(get_lfsr(ash_fit))
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
 
-stMLH.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+stMLH_ashr<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(stMLH_ashr)<- c("pm", "psd", "lfsr")
+rownames(stMLH_ashr)<-rownames(fit2)
+sig_interaction_stMLH_ashr<-subset(stMLH_ashr, lfsr < 0.1); dim(sig_interaction_stMLH_ashr) #0 
+
+stMLH.pvals<-as.data.frame(pvalues)
 colnames(stMLH.pvals)<- "stMLH"
 ```
 
@@ -125,45 +131,64 @@ colnames(stMLH.pvals)<- "stMLH"
 ## Male MHC I diversity ##
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$Male_MHCI_allele)
-design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
+``` 
 
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr"))) 
+```{r}
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+ash_fit <- ash(beta, se)
 
-Male_MHCI_allele_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(Male_MHCI_allele_int)<- c("coeff", "pvalue", "qvalue")
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd<-get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+Male_MHCI_allele_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(Male_MHCI_allele_int)<- c("pm", "SE", "lfsr")
 rownames(Male_MHCI_allele_int)<-rownames(fit2)
-sig_interaction_MHCIallele_div<-subset(Male_MHCI_allele_int, qvalue < 0.1); dim(sig_interaction_MHCIallele_div) 
+sig_interaction_MHCIallele_div<-subset(Male_MHCI_allele_int, lfsr < 0.1); dim(sig_interaction_MHCIallele_div) #238 
 
-MHCI_allele_div.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+sig5<-subset(Male_MHCI_allele_int, lfsr < 0.05);nrow(sig5) #229
+sig01<-subset(Male_MHCI_allele_int, lfsr < 0.01); nrow(sig01) #84
+
+MHCI_allele_div.pvals<-as.data.frame(pvalues)
 colnames(MHCI_allele_div.pvals)<- "MHCI_allele"
 ```
 
 
+
 #GSEA for genes related to postcopulatory change in expression and male genotype
-```{r}
-library(clusterProfiler)
-library(enrichplot)
-library(biomaRt)
-```
 
 ```{r}
-# Connect to Ensembl BioMart and Papio anubis
-ensembl <- useMart("ensembl", dataset = "panubis_gene_ensembl")  
+# Connect to Ensembl BioMart and select your organism (e.g., Papio anubis)
+ensembl <- useMart("ensembl", dataset = "panubis_gene_ensembl")  # Example for Papio anubis
+
+listAttributes(ensembl)
+
+# Retrieve GO term annotations for your genes
 go_annotations <- getBM(attributes = c("external_gene_name", "go_id", "name_1006"),
                         mart = ensembl)
+
+# View the GO annotations
+head(go_annotations)
+
+# Create TERM2GENE data frame (GO term to gene symbol mapping)
 TERM2GENE <- go_annotations[, c("go_id", "external_gene_name")]
+
+# Create TERM2NAME data frame (GO term to GO name mapping)
 TERM2NAME <- unique(go_annotations[, c("go_id", "name_1006")])
 ```
 
 ```{r}
-original_MHCI_allele_div_int_gene_list <- (coeff$"PostcopY:Genotype")
-names(original_MHCI_allele_div_int_gene_list) <- rownames(coeff)
+original_MHCI_allele_div_int_gene_list <- (pm)
+names(original_MHCI_allele_div_int_gene_list) <- rownames(fit2)
 MHCI_allele_div_int_gene_list<-na.omit(original_MHCI_allele_div_int_gene_list)
 MHCI_allele_div_int_gene_list = sort( (MHCI_allele_div_int_gene_list), decreasing = TRUE)
 ```
@@ -178,6 +203,7 @@ gsea_MHCI_allele_div_int <- GSEA(
 
 ```
 
+
 ```{r}
 write.table(gsea_MHCI_allele_div_int@result, "GSEA_MHCI_allele_div.txt", quote=F, row.names=F, col.names=F, sep="\t")
 ```
@@ -186,120 +212,169 @@ write.table(gsea_MHCI_allele_div_int@result, "GSEA_MHCI_allele_div.txt", quote=F
 ## Male MHC II diversity ##
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$Male_MHCII_allele)
-design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
 ``` 
 
 ```{r}
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
 
-Male_MHCII_allele_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(Male_MHCII_allele_int)<- c("coeff", "pvalue", "qvalue")
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd<-get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+Male_MHCII_allele_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(Male_MHCII_allele_int)<- c("pm", "SE", "lfsr")
 rownames(Male_MHCII_allele_int)<-rownames(fit2)
-sig_interaction_MHCIIallele_div<-subset(Male_MHCII_allele_int, qvalue < 0.1); dim(sig_interaction_MHCIIallele_div)
+sig_interaction_MHCIIallele_div<-subset(Male_MHCII_allele_int, lfsr < 0.1); dim(sig_interaction_MHCIIallele_div) #562 
 
-MHCII_allele_div.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+sig5<-subset(Male_MHCII_allele_int, lfsr < 0.05);nrow(sig5) #364
+sig01<-subset(Male_MHCII_allele_int, lfsr < 0.01); nrow(sig01) #147
+
+MHCII_allele_div.pvals<-as.data.frame(pvalues)
 colnames(MHCII_allele_div.pvals)<- "MHCII_allele"
 ```
 
 #GSEA for genes related to postcopulatory change in expression and male genotype
 ```{r}
-original_MHCII_allele_div_int_gene_list <- (coeff$"PostcopY:Genotype")
-names(original_MHCII_allele_div_int_gene_list) <- rownames(coeff)
+original_MHCII_allele_div_int_gene_list <- pm
+names(original_MHCII_allele_div_int_gene_list) <- rownames(fit2)
 MHCII_allele_div_int_gene_list<-na.omit(original_MHCII_allele_div_int_gene_list)
 MHCII_allele_div_int_gene_list = sort( (MHCII_allele_div_int_gene_list), decreasing = TRUE)
+```
 
+```{r}
 gsea_MHCII_allele_div_int <- GSEA(
   geneList = MHCII_allele_div_int_gene_list,
   TERM2GENE = TERM2GENE,
   TERM2NAME = TERM2NAME,
   pvalueCutoff = 0.05
 )
+
+```
+
+```{r}
+write.table(gsea_MHCII_allele_div_int@result, "GSEA_MHCII_allele_div.txt", quote=F, row.names=F, col.names=F, sep="\t")
 ```
 
 
 ## Male MHC I supertype diversity ##
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$Male_MHCI_supertype)
-design <- model.matrix(~ Postcop * Genotype + RIN + MalePresencec + Phase)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
 ``` 
 
 ```{r}
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
 
-Male_MHCI_supertype_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(Male_MHCI_supertype_int)<- c("coeff", "pvalue", "qvalue")
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd<- get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+Male_MHCI_supertype_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(Male_MHCI_supertype_int)<- c("pm", "SE", "lfsr")
 rownames(Male_MHCI_supertype_int)<-rownames(fit2)
-sig_interaction_MHCIsuper_div<-subset(Male_MHCI_supertype_int, qvalue < 0.1); dim(sig_interaction_MHCIsuper_div) 
-MHCI_super_div.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+sig_interaction_MHCIsuper_div<-subset(Male_MHCI_supertype_int, lfsr < 0.1); dim(sig_interaction_MHCIsuper_div) 
+
+sig5<-subset(Male_MHCI_supertype_int, lfsr < 0.05);nrow(sig5) 
+sig01<-subset(Male_MHCI_supertype_int, lfsr < 0.01); nrow(sig01)
+
+MHCI_super_div.pvals<-as.data.frame(pvalues)
 colnames(MHCI_super_div.pvals)<- "MHCI_super"
 ```
 
 #GSEA for genes related to postcopulatory change in expression and male genotype
 ```{r}
-original_MHCI_super_div_int_gene_list <- (coeff$"PostcopY:Genotype")
-names(original_MHCI_super_div_int_gene_list) <- rownames(coeff)
+original_MHCI_super_div_int_gene_list <- pm
+names(original_MHCI_super_div_int_gene_list) <- rownames(fit2)
 MHCI_super_div_int_gene_list<-na.omit(original_MHCI_super_div_int_gene_list)
 MHCI_super_div_int_gene_list = sort( (MHCI_super_div_int_gene_list), decreasing = TRUE)
+```
 
+```{r}
 gsea_MHCI_super_div_int <- GSEA(
   geneList = MHCI_super_div_int_gene_list,
   TERM2GENE = TERM2GENE,
   TERM2NAME = TERM2NAME,
   pvalueCutoff = 0.05
 )
+
 ```
 
 
 ## Male MHC II supertype diversity ##
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$Male_MHCII_supertype)
-design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
 ``` 
 
 ```{r}
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
 
-Male_MHCII_supertype_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(Male_MHCII_supertype_int)<- c("coeff", "pvalue", "qvalue")
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd<-get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+Male_MHCII_supertype_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(Male_MHCII_supertype_int)<- c("pm", "SE", "lfsr")
 rownames(Male_MHCII_supertype_int)<-rownames(fit2)
-sig_interaction_MHCIIsuper_div<-subset(Male_MHCII_supertype_int, qvalue < 0.1); dim(sig_interaction_MHCIIsuper_div)
+sig_interaction_MHCIIsuper_div<-subset(Male_MHCII_supertype_int, lfsr < 0.1); dim(sig_interaction_MHCIIsuper_div) #535 
 
-MHCII_super_div.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+sig5<-subset(Male_MHCII_supertype_int, lfsr < 0.05);nrow(sig5) #296
+sig01<-subset(Male_MHCII_supertype_int, lfsr < 0.01); nrow(sig01) #101
+
+MHCII_super_div.pvals<-as.data.frame(pvalues)
 colnames(MHCII_super_div.pvals)<- "MHCII_super"
 ```
 
 #GSEA for genes related to postcopulatory change in expression and male genotype
 ```{r}
-original_MHCII_super_div_int_gene_list <- (coeff$"PostcopY:Genotype")
-names(original_MHCII_super_div_int_gene_list) <- rownames(coeff)
+original_MHCII_super_div_int_gene_list <- pm
+names(original_MHCII_super_div_int_gene_list) <- rownames(fit2)
 MHCII_super_div_int_gene_list<-na.omit(original_MHCII_super_div_int_gene_list)
 MHCII_super_div_int_gene_list = sort( (MHCII_super_div_int_gene_list), decreasing = TRUE)
+```
 
+```{r}
 gsea_MHCII_super_div_int <- GSEA(
   geneList = MHCII_super_div_int_gene_list,
   TERM2GENE = TERM2GENE,
   TERM2NAME = TERM2NAME,
   pvalueCutoff = 0.05
 )
+
 ```
+
+```{r}
+write.table(gsea_MHCII_super_div_int@result, "GSEA_MHCII_super_div.txt", quote=F, row.names=F, col.names=F, sep="\t")
+```
+
 
 #Put all DE genes together
 ```{r}
@@ -317,153 +392,132 @@ sig_interaction_MHCIIsuper_div$Gene<-rownames(sig_interaction_MHCIIsuper_div)
 
 DEgene_diversity<-do.call(rbind, list(sig_interaction_MHCIallele_div, sig_interaction_MHCIIallele_div, sig_interaction_MHCIsuper_div, sig_interaction_MHCIIsuper_div))
 
-write.table(DEgene_diversity, "DEgenes_male_diversity.txt", quote=F, row.names=F, col.names=T, sep="\t")
+write.table(DEgene_diversity, "20Nov25_DEgenes_male_diversity.txt", quote=F, row.names=F, col.names=T, sep="\t")
 ```
 
-#Number of unique genes
+#Put all GSEA results together
 ```{r}
-length(unique(DEgene_diversity$Gene)) #481
+gsea_MHCI_allele_div_int@result$metric<-"MHCI allele diversity"
+gsea_MHCII_super_div_int@result$metric<-"MHCII supertype diversity"
+
+GSEA_diversity<-do.call(rbind, list(gsea_MHCI_allele_div_int@result, gsea_MHCII_super_div_int@result))
+
+write.table(GSEA_diversity, "20Nov25_GSEA_male_diversity.txt", quote=F, row.names=F, col.names=T, sep="\t")
 ```
 
-#venn diagram
+
+#Can you make one plot of GSEA results?
 ```{r}
-library(ggVennDiagram)
+Male_diversity_GSEA<- ggplot(GSEA_diversity, aes(x = metric, y = Description, size = NES, color = p.adjust)) +
+  geom_point() +
+  scale_color_gradient(low = "blue", high = "red") +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=45, hjust=1, vjust=1, size=12), axis.text.y=element_text(size=9)) +
+  labs(size = "Enrichment Score", color="Adjusted p-value", x="", y=""); Male_diversity_GSEA
 
-data <- list(
-  "MHCIallele_div" = rownames(sig_interaction_MHCIallele_div),
-  "MHCIsuper_div" = rownames(sig_interaction_MHCIsuper_div),
-  "MHCIIallele_div" = rownames(sig_interaction_MHCIIallele_div),
-  "MHCIIsuper_div" = rownames(sig_interaction_MHCIIsuper_div)
-)
-
-DE_venn<-ggVennDiagram(data, 
-              label = "count", 
-              set_color = c("#233D4D","#9C3848", "#69B578","#E3B505"),
-              set_size = 5,
-              label_size = 6,
-              edge_size = 2,
-              category.names = c("MHCI allele\n",  "MHCI supertype\n", "MHCII allele\n", "    MHCII supertype\n")) +
-  scale_fill_gradient(low="white", high="white")+
-    theme_void() +
-  scale_x_continuous(expand = expansion(mult = .2)) +
-  scale_y_continuous(expand = expansion(mult = .2)) +
-  theme(legend.position="none"); DE_venn
-    
-ggsave("MHC_DEgenes_venn.pdf", DE_venn, width=6, height=5)
-  
+ggsave("Male_diversity_GSEA.pdf", Male_diversity_GSEA, width=8, height=5)
 ```
-
-#fisher test
-```{r}
-# Define the total number of genes in the background
-total_genes <- 2716 
-
-# Find overlap
-overlap <- length(intersect(rownames(sig_interaction_MHCIallele_div), rownames(sig_interaction_MHCIIallele_div)))
-
-# Fisher's Exact Test
-mat <- matrix(c(total_genes - length(unique(c(rownames(sig_interaction_MHCIallele_div), rownames(sig_interaction_MHCIIallele_div)))), length(rownames(sig_interaction_MHCIallele_div)) - overlap, 
-                length(rownames(sig_interaction_MHCIIallele_div)) - overlap, 
-                overlap), nrow = 2)
-
-fisher.test(mat)
-```
-
-#Plot QQ plot of p-values for male diversity measures
-```{r}
-Div_pvals<-as.data.frame(cbind(stMLH.pvals, MHCI_allele_div.pvals, MHCII_allele_div.pvals, MHCI_super_div.pvals, MHCII_super_div.pvals))
-Div_pvalues_long<-pivot_longer(Div_pvals, cols=1:5, names_to="Genotype", values_to="pvalues")
-
-Div_pvalues_long_ordered <-Div_pvalues_long %>%
-  group_by(Genotype) %>%
-  arrange(pvalues, .by_group = TRUE)
-
-expected_one<-pnorm(qnorm(ppoints(nrow(Div_pvals))))
-expected.df<-as.data.frame(matrix(rep(expected_one,5),ncol=1,byrow = F))
-
-div_qqplot <-cbind(Div_pvalues_long_ordered, expected.df)                           
-div_qqplot$Genotype<- ordered(as.factor(div_qqplot$Genotype), levels = c('stMLH', 'MHCI_allele', 'MHCI_super', 'MHCII_allele', 'MHCII_super'))
-
-Div_pval_qqplot<- ggplot(data = div_qqplot, aes(x = -log(V1), y = -log(pvalues), group=Genotype, color=Genotype)) +
-         geom_point() +
-        geom_abline(slope = 1) + 
-          labs(x = 'Expected p-values (-log10)', y = 'Observed p-values (-log10)', title = 'Measures of male diversity', color="") +
-          theme_bw() +
-        theme(plot.title=element_text(hjust=0.5)) +
-        ylim(0,15)+
-        xlim(0,10) +
-      scale_color_manual(values=c("#F78154", "#233D4D","#9C3848" , "#69B578","#E3B505"), breaks=c('stMLH', 'MHCI_allele', 'MHCI_super', 'MHCII_allele', 'MHCII_super'), labels= c("multi-locus", "MHC I allelic", "MHC I supertype", "MHC II allelic", "MHC II supertype")) +
-  guides(color = guide_legend(override.aes = list(size = 4))); Div_pval_qqplot
-
-ggsave("Div_pval_qqplot.pdf", Div_pval_qqplot, width=5, height=3)
-
-```
-
-
 
 
 ######################## Measures of complementarity #########################
 
 
-## KINSHIP ##
+# KINSHIP ##
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$KINSHIP)
-design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus) # runs the linear model
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
 ``` 
 
 ```{r}
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
 
-kinship_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(kinship_int)<- c("coeff", "pvalue", "qvalue")
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd<- get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+kinship_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(kinship_int)<- c("pm", "SE", "lfsr")
 rownames(kinship_int)<-rownames(fit2)
-sig_interaction_kinship<-subset(kinship_int, qvalue < 0.1); dim(sig_interaction_kinship) 
+sig_interaction_kinship<-subset(kinship_int, lfsr < 0.1); dim(sig_interaction_kinship) #9 
 
-hist(fit2$p.value[,"PostcopY:Genotype"])
-qq(pvalues$"PostcopY:Genotype")
+sig5<-subset(kinship_int, lfsr < 0.05);nrow(sig5) #2
+sig01<-subset(kinship_int, lfsr < 0.01); nrow(sig01) #1
 
-KINSHIP.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+KINSHIP.pvals<-as.data.frame(pvalues)
 colnames(KINSHIP.pvals)<- "KINSHIP"
 ```
 
 
-## MHC I allele comp ##
+#GSEA for genes related to postcopulatory change in expression and male genotype
+```{r}
+original_KINSHIP_int_gene_list <- (pm)
+names(original_KINSHIP_int_gene_list) <- rownames(fit2)
+KINSHIP_int_gene_list<-na.omit(original_KINSHIP_int_gene_list)
+KINSHIP_int_gene_list = sort( (KINSHIP_int_gene_list), decreasing = TRUE)
+```
+
+```{r}
+gsea_KINSHIP_int <- GSEA(
+  geneList = KINSHIP_int_gene_list,
+  TERM2GENE = TERM2GENE,
+  TERM2NAME = TERM2NAME,
+  pvalueCutoff = 0.05
+)
+
+```
+
+# MHC I allele comp ##
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$MHCI_allele_comp)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
 design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
 ``` 
 
 ```{r}
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
 
-MHCI_allele_comp_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(MHCI_allele_comp_int)<- c("coeff", "pvalue", "qvalue")
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd<- get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+MHCI_allele_comp_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(MHCI_allele_comp_int)<- c("pm", "SE", "lfsr")
 rownames(MHCI_allele_comp_int)<-rownames(fit2)
-sig_interaction_MHCIallele_comp<-subset(MHCI_allele_comp_int, qvalue < 0.1); dim(sig_interaction_MHCIallele_comp) 
+sig_interaction_MHCIallele_comp<-subset(MHCI_allele_comp_int, lfsr < 0.1); dim(sig_interaction_MHCIallele_comp) #735. 
 
-MHCI_allele.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+sig5<-subset(MHCI_allele_comp_int, lfsr< 0.05);nrow(sig5) #454
+sig01<-subset(MHCI_allele_comp_int, lfsr < 0.01); nrow(sig01) #185
+
+MHCI_allele.pvals<-as.data.frame(pvalues)
 colnames(MHCI_allele.pvals)<- "MHCI_allele"
 ```
 
 #GSEA for genes related to postcopulatory change in expression and male genotype
 ```{r}
-original_MHCI_allele_comp_int_gene_list <- (coeff$"PostcopY:Genotype")
-names(original_MHCI_allele_comp_int_gene_list) <- rownames(coeff)
+original_MHCI_allele_comp_int_gene_list <- (pm)
+names(original_MHCI_allele_comp_int_gene_list) <- rownames(fit2)
 MHCI_allele_comp_int_gene_list<-na.omit(original_MHCI_allele_comp_int_gene_list)
 MHCI_allele_comp_int_gene_list = sort( (MHCI_allele_comp_int_gene_list), decreasing = TRUE)
+```
 
+```{r}
 gsea_MHCI_allele_comp_int <- GSEA(
   geneList = MHCI_allele_comp_int_gene_list,
   TERM2GENE = TERM2GENE,
@@ -471,11 +525,18 @@ gsea_MHCI_allele_comp_int <- GSEA(
   pvalueCutoff = 0.05
 )
 
-write.table(gsea_MHCI_allele_comp_int@result, "GSEA_MHCI_allele_comp.txt", quote=F, row.names=F, col.names=F, sep="\t")
+dim(gsea_MHCI_allele_comp_int)
 ```
 
 ```{r}
-#dotplot
+write.table(gsea_MHCI_allele_comp_int@result, "GSEA_MHCI_allele_comp.txt", quote=F, row.names=F, col.names=F, sep="\t")
+```
+
+
+```{r}
+#Figure S3
+gsea_MHCI_allele_comp_int@result<- subset(gsea_MHCI_allele_comp_int@result, Description != "")
+
 gsea_MHCI_allele_comp_int_dot<-dotplot(gsea_MHCI_allele_comp_int, split=".sign") + facet_grid(.~.sign) +
   theme(strip.text=element_text(size=15), axis.text.y=element_text(size=10, lineheight=0.7), axis.text.x=element_text(size=10)) +
   ggtitle("MHCI allelic complementarity") +
@@ -486,39 +547,97 @@ ggsave("gsea_MHCI_allele_comp_int_dot.pdf", gsea_MHCI_allele_comp_int_dot, width
 
 
 
+```{r}
+#Figure 4C:
+gsea_MHCI_allele_comp_int@result<-subset(gsea_MHCI_allele_comp_int@result, NES > 0)
+
+gsea_MHCI_allele_comp_int_ridge<- ridgeplot(gsea_MHCI_allele_comp_int, showCategory=8) + 
+  labs(x = "enrichment distribution") +
+  theme(14)+
+  scale_fill_gradient(low= "gray30", high="gray100");gsea_MHCI_allele_comp_int_ridge
+
+ggsave("gsea_MHCI_allele_comp_int_ridge.pdf", gsea_MHCI_allele_comp_int_ridge, width=6.5, height=4)
+```
+
+```{r}
+#Figure 4D: MAP3K2
+#norm counts also in S3 data
+norm_counts<-voom_matrix$E
+MAP3K2_counts<-as.data.frame(norm_counts["MAP3K2",])
+colnames(MAP3K2_counts)<-c("norm_counts")
+MAP3K2_counts$sampleID<-rownames(MAP3K2_counts)
+MAP3K2_counts$Genotype <- Postcop_DE_samples$MHCI_allele_comp
+MAP3K2_counts$Postcop <- Postcop_DE_samples$Postcop
+MAP3K2_counts$FemaleID <- Postcop_DE_samples$FemaleID
+MAP3K2_counts$gene<- "MAP3K2"
+
+MAP3K2_counts_binned<- MAP3K2_counts %>%
+  mutate(Binned_genotype = ifelse(Genotype < 0.3, "High comp", ifelse(Genotype > 0.3, "Low comp", "Mid comp")))
+
+MAP3K2_counts_binned_edit<-MAP3K2_counts_binned %>%
+  mutate(Bin_type= ifelse(Postcop == "N", "Baseline", as.character(Binned_genotype)))
+MAP3K2_counts_binned_edit$Bin_type<-ordered(MAP3K2_counts_binned_edit$Bin_type, levels=c("Baseline", "Low comp", "Mid comp", "High comp"))
+
+MAP3K2_mhcicomp<-ggplot(data=MAP3K2_counts_binned_edit, aes(x=gene, y=norm_counts, color=Postcop)) +
+  facet_wrap(~Bin_type, nrow=1) +
+  geom_boxplot(outlier.shape=NA) +
+  geom_jitter(width=0.3, color="black", size=0.5) +
+  theme_bw() +
+  scale_color_manual(values= c("#2E4D2F", "#69B578")) +
+  ylab("Normalized counts") +
+  xlab("MHC I allelic complementarity") +
+  ggtitle("MAP3K2 expression") +
+  theme(plot.title=element_text(hjust=0.5), axis.title.x=element_text(hjust=0.7), axis.text.x=element_blank()); MAP3K2_mhcicomp
+
+ggsave("MAP3K2_MHCI_allele_comp.pdf", MAP3K2_mhcicomp, width=4.8, height=3.2)
+```
+
+
 ## MHC II allele comp ##
 
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$MHCII_allele_comp)
-design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
 ``` 
 
 ```{r}
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
 
-MHCII_allele_comp_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(MHCII_allele_comp_int)<- c("coeff", "pvalue", "qvalue")
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd<- get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+MHCII_allele_comp_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(MHCII_allele_comp_int)<- c("pm", "SE", "lfsr")
 rownames(MHCII_allele_comp_int)<-rownames(fit2)
-sig_interaction_MHCIIallele_comp<-subset(MHCII_allele_comp_int, qvalue < 0.1); dim(sig_interaction_MHCIIallele_comp)
+sig_interaction_MHCIIallele_comp<-subset(MHCII_allele_comp_int, lfsr < 0.1); dim(sig_interaction_MHCIIallele_comp) #416. 
 
-MHCII_allele.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+sig5<-subset(MHCII_allele_comp_int, lfsr < 0.05);nrow(sig5) #217
+sig01<-subset(MHCII_allele_comp_int, lfsr < 0.01); nrow(sig01) #55
+
+MHCII_allele.pvals<-as.data.frame(pvalues)
 colnames(MHCII_allele.pvals)<- "MHCII_allele"
 ```
 
 
 #GSEA for genes related to postcopulatory change in expression and male genotype
 ```{r}
-original_MHCII_allele_comp_int_gene_list <- (coeff$"PostcopY:Genotype")
-names(original_MHCII_allele_comp_int_gene_list) <- rownames(coeff)
+original_MHCII_allele_comp_int_gene_list <- pm
+names(original_MHCII_allele_comp_int_gene_list) <- rownames(fit2)
 MHCII_allele_comp_int_gene_list<-na.omit(original_MHCII_allele_comp_int_gene_list)
 MHCII_allele_comp_int_gene_list = sort( (MHCII_allele_comp_int_gene_list), decreasing = TRUE)
+```
 
+```{r}
 gsea_MHCII_allele_comp_int <- GSEA(
   geneList = MHCII_allele_comp_int_gene_list,
   TERM2GENE = TERM2GENE,
@@ -526,83 +645,103 @@ gsea_MHCII_allele_comp_int <- GSEA(
   pvalueCutoff = 0.05
 )
 
+dim(gsea_MHCII_allele_comp_int)
+```
+
+```{r}
 write.table(gsea_MHCII_allele_comp_int@result, "GSEA_MHCII_allele_comp.txt", quote=F, row.names=F, col.names=F, sep="\t")
 ```
 
-
 ```{r}
-gsea_MHCII_allele_comp_int_dot<-dotplot(gsea_MHCII_allele_comp_int, showCategory=8, split=".sign") + facet_grid(.~.sign) +
+#Figure S4
+gsea_MHCII_allele_comp_int@result<- subset(gsea_MHCII_allele_comp_int@result, Description != "")
+
+gsea_MHCII_allele_comp_int_dot<-dotplot(gsea_MHCII_allele_comp_int, split=".sign") + facet_grid(.~.sign) +
   theme(strip.text=element_text(size=15), axis.text.y=element_text(size=10, lineheight=0.7), axis.text.x=element_text(size=10)) +
   ggtitle("MHCII allelic complementarity") +
   scale_fill_gradient(low= "gray30", high="gray100");gsea_MHCII_allele_comp_int_dot
 
-ggsave("gsea_MHCII_allele_comp_int_dot.pdf", gsea_MHCII_allele_comp_int_dot, width=5, height=4)
+ggsave("gsea_MHCII_allele_comp_int_dot.pdf", gsea_MHCII_allele_comp_int_dot, width=8, height=6)
 ```
 
-```{r}
-gsea_MHCII_allele_comp_int_ridge<- ridgeplot(gsea_MHCII_allele_comp_int, showCategory=6) + 
-  labs(x = "enrichment distribution") +
-  scale_fill_gradient(low= "gray30", high="gray100");gsea_MHCII_allele_comp_int_ridge
 
-ggsave("gsea_MHCII_allele_comp_int_ridge.pdf", gsea_MHCII_allele_comp_int_ridge, width=7, height=5)
-```
-
-## MHC I supertype comp ##
-
+# MHC I supertype comp ##
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$MHCI_supertype_comp)
-design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
 ``` 
 
 ```{r}
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
 
-MHCI_supertype_comp_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(MHCI_supertype_comp_int)<- c("coeff", "pvalue", "qvalue")
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd <- get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+MHCI_supertype_comp_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(MHCI_supertype_comp_int)<- c("pm", "SE", "lfsr")
 rownames(MHCI_supertype_comp_int)<-rownames(fit2)
-sig_interaction_MHCIsuper_comp<-subset(MHCI_supertype_comp_int, qvalue < 0.1); dim(sig_interaction_MHCIsuper_comp) 
+sig_interaction_MHCIsuper_comp<-subset(MHCI_supertype_comp_int, lfsr < 0.1); dim(sig_interaction_MHCIsuper_comp) 
 
-MHCI_super.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+sig5<-subset(MHCI_supertype_comp_int, lfsr < 0.05);nrow(sig5) 
+sig01<-subset(MHCI_supertype_comp_int, lfsr < 0.01); nrow(sig01) 
+
+MHCI_super.pvals<-as.data.frame(pvalues)
 colnames(MHCI_super.pvals)<- "MHCI_super"
 ```
 
 # MHC II supertype comp ##
 ```{r}
 Genotype <- as.vector(Postcop_DE_samples$MHCII_supertype_comp)
-design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+design <- model.matrix(~ Postcop * Genotype + RIN + MaleStatus + Phase)
 voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
 dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
 fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
-fit2 <- eBayes(fit)
+fit2 <- eBayes(fit, robust=TRUE)
 ``` 
 
 ```{r}
-coeff<- as.data.frame(fit2$coeff)
-pvalues<- as.data.frame(fit2$p.value)
-qvalues<- as.data.frame(apply(fit2$p.value, 2, function(x)p.adjust(x, method="fdr")))
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
 
-MHCII_supertype_comp_int<-as.data.frame(cbind(coeff$"PostcopY:Genotype", pvalues$"PostcopY:Genotype", qvalues$"PostcopY:Genotype"))
-colnames(MHCII_supertype_comp_int)<- c("coeff", "pvalue", "qvalue")
+# Extract shrunken estimates
+pm <- get_pm(ash_fit)
+psd<- get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+MHCII_supertype_comp_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(MHCII_supertype_comp_int)<- c("pm", "SE", "lfsr")
 rownames(MHCII_supertype_comp_int)<-rownames(fit2)
-sig_interaction_MHCIIsuper_comp<-subset(MHCII_supertype_comp_int, qvalue < 0.1); dim(sig_interaction_MHCIIsuper_comp)
+sig_interaction_MHCIIsuper_comp<-subset(MHCII_supertype_comp_int, lfsr < 0.1); dim(sig_interaction_MHCIIsuper_comp) #9. 
 
-MHCII_super.pvals<-as.data.frame(fit2$p.value[,"PostcopY:Genotype"])
+sig5<-subset(MHCII_supertype_comp_int, lfsr < 0.05);nrow(sig5) #6
+sig01<-subset(MHCII_supertype_comp_int, lfsr < 0.01); nrow(sig01) #2
+
+MHCII_super.pvals<-as.data.frame(pvalues)
 colnames(MHCII_super.pvals)<- "MHCII_super"
 ```
 
 #GSEA for genes related to postcopulatory change in expression and male genotype
 ```{r}
-original_MHCII_super_comp_int_gene_list <- (coeff$"PostcopY:Genotype")
+original_MHCII_super_comp_int_gene_list <- (pm)
 names(original_MHCII_super_comp_int_gene_list) <- rownames(coeff)
 MHCII_super_comp_int_gene_list<-na.omit(original_MHCII_super_comp_int_gene_list)
 MHCII_super_comp_int_gene_list = sort( (MHCII_super_comp_int_gene_list), decreasing = TRUE)
+```
 
+```{r}
 gsea_MHCII_super_comp_int <- GSEA(
   geneList = MHCII_super_comp_int_gene_list,
   TERM2GENE = TERM2GENE,
@@ -617,74 +756,67 @@ gsea_MHCII_super_comp_int <- GSEA(
 sig_interaction_kinship$metric<-"KINSHIP"
 sig_interaction_MHCIallele_comp$metric<-"MHCI allele complementarity"
 sig_interaction_MHCIIallele_comp$metric<-"MHCII allele complementarity"
+sig_interaction_MHCIsuper_comp$metric<-"MHCI supertype complementarity"
 sig_interaction_MHCIIsuper_comp$metric<-"MHCII supertype complementarity"
 
-DEgene_complementarity<-do.call(rbind, list(sig_interaction_kinship, sig_interaction_MHCIallele_comp, sig_interaction_MHCIIallele_comp, sig_interaction_MHCIIsuper_comp))
+DEgene_complementarity<-do.call(rbind, list(sig_interaction_kinship, sig_interaction_MHCIallele_comp, sig_interaction_MHCIIallele_comp, sig_interaction_MHCIsuper_comp, sig_interaction_MHCIIsuper_comp))
 DEgene_complementarity$Gene<-rownames(DEgene_complementarity)
 
-write.table(DEgene_complementarity, "DEgenes_complementarity.txt", quote=F, row.names=F, col.names=T, sep="\t")
+write.table(DEgene_complementarity, "20Nov25_DEgenes_complementarity.txt", quote=F, row.names=F, col.names=T, sep="\t")
 ```
-
-#DE Genes shared across genotype analyses
-```{r}
-length(unique(DEgene_complementarity$Gene)) #997 unique
-complist<-list(rownames(sig_interaction_MHCIallele_comp), rownames(sig_interaction_MHCIIallele_comp))
-common_elements <- Reduce(intersect, complist) #169 in common
-```
-
-#visualize
-```{r}
-data <- list(
-  "MHCIallele_comp" = rownames(sig_interaction_MHCIallele_comp),
-  "MHCIIallele_comp" = rownames(sig_interaction_MHCIIallele_comp)
-)
-
-
-DE_venn<-ggVennDiagram(data, 
-              label = "count", 
-              set_color = c("#233D4D", "#69B578"),
-              set_size = 5,
-              label_size = 6,
-              edge_size = 2,
-              category.names = c("MHCI allele             ",  "MHCII allele              ")) +
-    scale_fill_gradient(low="white", high="white")+
-    theme_void() +
-  scale_x_continuous(expand = expansion(mult = .4)) +
-  scale_y_continuous(expand = expansion(mult = .2)) +
-  theme(legend.position="none"); DE_venn
-    
-ggsave("MHCcomp_DEgenes_venn.pdf", DE_venn, width=6, height=5)
-```
-
-
-#fisher test
-```{r}
-# Define the total number of genes in the background
-total_genes <- 2716 
-
-# Find overlap
-overlap <- length(intersect(rownames(sig_interaction_MHCIallele_comp), rownames(sig_interaction_MHCIIallele_comp)))
-
-# Fisher's Exact Test
-mat <- matrix(c(total_genes - length(unique(c(rownames(sig_interaction_MHCIallele_comp), rownames(sig_interaction_MHCIIallele_comp)))), length(rownames(sig_interaction_MHCIallele_comp)) - overlap, 
-                length(rownames(sig_interaction_MHCIIallele_comp)) - overlap, 
-                overlap), nrow = 2)
-
-fisher.test(mat)
-```
-
 
 #Put all GSEA results together
 ```{r}
 gsea_MHCI_allele_comp_int@result$metric<-"MHCI allele complementarity"
 gsea_MHCII_allele_comp_int@result$metric<-"MHCII allele complementarity"
+
 GSEA_complementarity<-do.call(rbind, list(gsea_MHCI_allele_comp_int@result, gsea_MHCII_allele_comp_int@result))
 
-write.table(GSEA_complementarity, "GSEA_complementarity.txt", quote=F, row.names=F, col.names=T, sep="\t")
+length(unique(GSEA_complementarity$Description))
+
+
+write.table(GSEA_complementarity, "20Nov25_GSEA_complementarity.txt", quote=F, row.names=F, col.names=T, sep="\t")
 ```
 
+#Plot QQ plot of p-values
 
-### Q-Q plot of p-values
+#male diversity measures
+```{r}
+#Figure 3A
+Div_pvals<-as.data.frame(cbind(stMLH.pvals, MHCI_allele_div.pvals, MHCII_allele_div.pvals, MHCI_super_div.pvals, MHCII_super_div.pvals))
+Div_pvalues_long<-pivot_longer(Div_pvals, cols=1:5, names_to="Genotype", values_to="pvalues")
+
+Div_pvalues_long_ordered <-Div_pvalues_long %>%
+  group_by(Genotype) %>%
+  arrange(pvalues, .by_group = TRUE)
+
+expected_one<-pnorm(qnorm(ppoints(nrow(Div_pvals))))
+expected.df<-as.data.frame(matrix(rep(expected_one,5),ncol=1,byrow = F))
+
+div_qqplot <-cbind(Div_pvalues_long_ordered, expected.df)                           
+
+div_qqplot$Genotype<- ordered(as.factor(div_qqplot$Genotype), levels = c('stMLH', 'MHCI_allele', 'MHCI_super', 'MHCII_allele', 'MHCII_super'))
+
+colnames(div_qqplot)<-c("Genotype", "obs_pvalues", "exp_pvalues")
+write.table(div_qqplot, "Div_pval_qqplot_df.txt", quote=F, sep="\t")
+
+Div_pval_qqplot<- ggplot(data = div_qqplot, aes(x = -log(exp_pvalues), y = -log(obs_pvalues), group=Genotype, color=Genotype)) +
+         geom_point() +
+        geom_abline(slope = 1) + 
+          labs(x = 'Expected p-values (-log10)', y = 'Observed p-values (-log10)', title = 'Measures of male diversity', color="") +
+          theme_bw() +
+        theme(plot.title=element_text(hjust=0.5)) +
+        ylim(0,15)+
+        xlim(0,10) +
+      scale_color_manual(values=c("#F78154", "#233D4D","#9C3848" , "#69B578","#E3B505"), breaks=c('stMLH', 'MHCI_allele', 'MHCI_super', 'MHCII_allele', 'MHCII_super'), labels= c("multi-locus", "MHC I allelic", "MHC I supertype", "MHC II allelic", "MHC II supertype")) +
+  guides(color = guide_legend(override.aes = list(size = 4))); Div_pval_qqplot
+
+ggsave("Div_pval_qqplot.pdf", Div_pval_qqplot, width=5, height=3)
+
+
+
+```
+
 
 #complementarity measures
 ```{r}
@@ -700,8 +832,10 @@ expected.df<-as.data.frame(matrix(rep(expected_one,5),ncol=1,byrow = F))
 
 comp_qqplot<-cbind(Comp_pvalues_long_ordered, expected.df)                           
 
+colnames(comp_qqplot)<-c("Genotype", "obs_pvalues", "exp_pvalues")
+write.table(comp_qqplot, "Comp_pval_qqplot_df.txt", quote=F, sep="\t")
 
-Comp_pval_qqplot<-ggplot(data = comp_qqplot, aes(x = -log(V1), y = -log(pvalues), group=Genotype, color=Genotype)) +
+Comp_pval_qqplot<-ggplot(data = comp_qqplot, aes(x = -log(exp_pvalues), y = -log(obs_pvalues), group=Genotype, color=Genotype)) +
          geom_point() +
         geom_abline(slope = 1) + 
          labs(x = 'Expected p-values (-log10)', y = 'Observed p-values (-log10)', title = 'Measures of complementarity', color="") +
@@ -715,36 +849,124 @@ Comp_pval_qqplot<-ggplot(data = comp_qqplot, aes(x = -log(V1), y = -log(pvalues)
 ggsave("Comp_pval_qqplot.pdf", Comp_pval_qqplot, width=5, height=3)
 ```
 
-#Plot normalized counts of an example gene!
+
 ```{r}
+ggarrange(Div_pval_qqplot, Comp_pval_qqplot, nrow=1)
+```
 
-norm_counts<-voom_matrix$E
-VAV1_counts<-as.data.frame(norm_counts["VAV1",])
-colnames(VAV1_counts)<-c("norm_counts")
-VAV1_counts$sampleID<-rownames(VAV1_counts)
-VAV1_counts$Genotype <- Postcop_DE_samples$MHCII_allele_comp
-VAV1_counts$Postcop <- Postcop_DE_samples$Postcop
-VAV1_counts$Postcop <-ifelse(VAV1_counts$Postcop == "N", "No", "Yes")
-VAV1_counts$FemaleID <- Postcop_DE_samples$FemaleID
-VAV1_counts$gene<- "VAV1"
 
-VAV1_counts_binned<- VAV1_counts %>%
-  mutate(Binned_genotype = ifelse(Genotype < 0.15, "High MHC comp", "Low MHC comp"))
+## Do sig genes remain significant after FWER adjustment?
+```{r}
+rownames(Comp_pvals)<-rownames(fit2)
+Comp_pvals_adj <- as.data.frame(
+  t(apply(Comp_pvals, 1, function(x) p.adjust(x, method = "holm")))
+)
+rownames(Comp_pvals_adj)<-rownames(fit2)
 
-VAV1_counts_binned_edit<-VAV1_counts_binned %>%
-  mutate(Bin_type= ifelse(Postcop == "No", "Non-copulatory", as.character(Binned_genotype)))
-VAV1_counts_binned_edit$Bin_type<-ordered(VAV1_counts_binned_edit$Bin_type, levels=c("Non-copulatory", "Low MHC comp", "High MHC comp"))
+passFWER<- as.data.frame(matrix(NA, nrow=0, ncol=2))
+colnames(passFWER)<-c("gene", "metric")
 
-VAV1_mhcicomp<-ggplot(data=VAV1_counts_binned_edit, aes(x=gene, y=norm_counts, color=Postcop)) +
-  facet_wrap(~Bin_type, nrow=1) +
-  geom_boxplot(outlier.shape=NA) +
-  geom_jitter(width=0.2, size=0.5, alpha=0.5, color="black") +
-  theme_bw() +
-  scale_color_manual(values= c("#2E4D2F", "#69B578")) +
-  ylab("Normalized counts") +
-  xlab("\n              MHC II allelic complementarity") +
-  ggtitle("VAV1") +
-  theme(plot.title=element_text(hjust=0.5, face="italic"), axis.title.x=element_text(hjust=0.7), axis.text.x=element_blank()); VAV1_mhcicomp
+# Give adjusted columns clear names
+colnames(Comp_pvals_adj) <- paste0(colnames(Comp_pvals), "_adj")
 
-ggsave("VAV1_MHCII_allele_comp.pdf", VAV1_mhcicomp, width=4.8, height=3.2)
+#Compare to sig genes based on lfsr
+sig_fwer<-rownames(subset(Comp_pvals_adj, KINSHIP_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_complementarity, metric == "KINSHIP")) #9
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+common$metric<-"KINSHIP"
+passFWER<- rbind(passFWER, common)
+
+sig_fwer<-rownames(subset(Comp_pvals_adj, MHCI_allele_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_complementarity, metric == "MHCI allele complementarity")) #735
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+common$metric<-"MHCI allele complementarity"
+passFWER<- rbind(passFWER, common)
+
+
+sig_fwer<-rownames(subset(Comp_pvals_adj, MHCII_allele_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_complementarity, metric == "MHCII allele complementarity")) #416
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+common$metric<-"MHCII allele complementarity"
+passFWER<- rbind(passFWER, common)
+
+sig_fwer<-rownames(subset(Comp_pvals_adj, MHCI_super_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_complementarity, metric == "MHCI supertype complementarity")) #31
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+common$metric<-"MHCI supertype complementarity"
+passFWER<- rbind(passFWER, common)
+
+sig_fwer<-rownames(subset(Comp_pvals_adj, MHCII_super_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_complementarity, metric == "MHCII supertype complementarity")) #9
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+common$metric<-"MHCII supertype complementarity"
+passFWER<- rbind(passFWER, common)
+
+
+#make a new column in the results dataframe saying whether or not a gene passed the FWER correction
+passFWER$metricgene<-paste(passFWER$metric, passFWER$gene, sep="_")
+DEgene_complementarity$metricgene<-paste(DEgene_complementarity$metric, DEgene_complementarity$Gene, sep="_")
+DEgene_complementarity<- DEgene_complementarity %>%
+  mutate(pass_FWER= ifelse(metricgene %in% passFWER$metricgene, "yes", "no")) %>%
+  dplyr::select(!metricgene)
+
+write.table(DEgene_complementarity, "20Nov25_DEgenes_complementarity.txt", quote=F, row.names=F, col.names=T, sep="\t")
+```
+
+```{r}
+rownames(Div_pvals)<-rownames(fit2)
+Div_pvals_adj <- as.data.frame(
+  t(apply(Div_pvals, 1, function(x) p.adjust(x, method = "holm")))
+)
+rownames(Div_pvals_adj)<-rownames(fit2)
+
+passFWER<- as.data.frame(matrix(NA, nrow=0, ncol=2))
+colnames(passFWER)<-c("gene", "metric")
+
+# Give adjusted columns clear names
+colnames(Div_pvals_adj) <- paste0(colnames(Div_pvals), "_adj")
+
+#Compare to sig genes based on lfsr
+sig_fwer<-rownames(subset(Div_pvals_adj, stMLH_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_diversity, metric == "stMLH")) #9
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+
+sig_fwer<-rownames(subset(Div_pvals_adj, MHCI_allele_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_diversity, metric == "MHCI allele diversity")) #735
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+common$metric<-"MHCI allele diversity"
+passFWER<- rbind(passFWER, common)
+
+sig_fwer<-rownames(subset(Div_pvals_adj, MHCII_allele_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_diversity, metric == "MHCII allele diversity")) #416
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+common$metric<-"MHCII allele diversity"
+passFWER<- rbind(passFWER, common)
+
+sig_fwer<-rownames(subset(Div_pvals_adj, MHCI_super_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_diversity, metric == "MHCI supertype diversity")) #31
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+common$metric<-"MHCI supertype diversity"
+passFWER<- rbind(passFWER, common)
+
+sig_fwer<-rownames(subset(Div_pvals_adj, MHCII_super_adj < 0.05))  
+sig_lfsr<-rownames(subset(DEgene_diversity, metric == "MHCII supertype diversity")) #9
+common<-setNames(as.data.frame(intersect(sig_lfsr, sig_fwer)), "gene")#15
+common$metric<-"MHCII supertype diversity"
+passFWER<- rbind(passFWER, common)
+
+
+#make a new column in the results dataframe saying whether or not a gene passed the FWER correction
+passFWER$metricgene<-paste(passFWER$metric, passFWER$gene, sep="_")
+DEgene_diversity$metricgene<-paste(DEgene_diversity$metric, DEgene_diversity$Gene, sep="_")
+DEgene_diversity<- DEgene_diversity %>%
+  mutate(pass_FWER= ifelse(metricgene %in% passFWER$metricgene, "yes", "no")) %>%
+  dplyr::select(!metricgene)
+
+write.table(DEgene_diversity, "20Nov25_DEgenes_diversity.txt", quote=F, row.names=F, col.names=T, sep="\t")
+```
+
+#how many DE genes pass both these thresholds
+```{r}
+nnn <- unique(subset(DEgene_diversity, pass_FWER== "yes")$Gene)
+ccc <- unique(subset(DEgene_complementarity, pass_FWER== "yes")$Gene)
 ```

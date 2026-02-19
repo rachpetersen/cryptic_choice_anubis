@@ -1,0 +1,432 @@
+---
+title: "LOO analysis"
+output: html_document
+date: "2025-06-19"
+---
+
+```{r, setup, include=FALSE}
+library(tidyverse)
+
+knitr::opts_knit$set(root.dir ="/Users/rachelpetersen/Library/CloudStorage/GoogleDrive-rpetersen42@gmail.com/Other computers/My MacBook Pro (1)/Dissertation/dissertation_transcriptomics_chapter")
+
+library(fgsea)
+```
+
+
+
+#load count data
+```{r}
+load("anubis_featurecounts.Rdata")
+counts <- as.data.frame(anubisfc$counts)
+colnames(counts)<-gsub(".anubis.useqs.merged.bam", "", colnames(counts)) 
+```
+
+#Find best postcop samples
+```{r}
+CountsperSampleType<-read.csv("DE_sample_metadata.csv")
+Postcop<-subset(CountsperSampleType, Postcop == "Y")
+Postcop_IDs<- c("Viva", "Suzon", "Vertige", "Vuei", "Salade", "Sottise")
+
+Postcop_any_phase <- Postcop %>%
+  filter(phasecode == "F" | phasecode == "PreF" | phasecode == "PostF") %>%
+  filter(uniquely_mapped_total > 5000000) %>%
+  group_by(FemaleID) #25 samples from 6 different females
+
+Noncop_any_phase <- CountsperSampleType %>%
+  filter(Postcop == "N") %>%
+  filter(phasecode == "F" | phasecode == "PreF" | phasecode == "PostF") %>%
+  filter(uniquely_mapped_total > 5000000) %>%
+  filter(FemaleID %in% Postcop_IDs) 
+#30 samples from 6 females. 
+
+Postcop_DE_samples<-rbind(Postcop_any_phase, Noncop_any_phase)
+Postcop_DE_samplesPostcop <- as.vector(Postcop_DE_samples$Postcop)
+```
+
+#filter counts for best samples
+```{r}
+countspostcop_de <- counts[,Postcop_DE_samples$Sample_ID]
+```
+
+#Create DGEList 
+```{r}
+DGEList= NULL
+DGEList <- DGEList(counts=countspostcop_de, genes=anubisfc$annotation[,c("GeneID","Length")], group=factor(Postcop_DE_samplesPostcop))
+```
+
+#Remove low expressed genes (>10cpm in at least half of samples)
+```{r}
+keep <- rowSums(cpm(DGEList) > 10) >= 28
+FilteredDGEList <- DGEList[keep,]
+```
+
+#Remove genes starting with "LOC"
+```{r}
+FilteredDGEList$counts<- FilteredDGEList$counts[!grepl("LOC", rownames(FilteredDGEList$counts)), ]
+FilteredDGEList$genes<- FilteredDGEList$genes[!grepl("LOC", rownames(FilteredDGEList$genes)), ]
+```
+
+#remove genes highly expressed in semen samples
+```{r}
+semengenes<- read.table("semengenevector_19Jan25.txt")
+semengenevector <- as.vector(semengenes[,1])
+FilteredDGEList <- FilteredDGEList[!rownames(FilteredDGEList) %in% semengenevector, ]
+```
+
+#Reset the library sizes
+```{r}
+FilteredDGEList$samples$lib.size <- colSums(FilteredDGEList$counts)
+```
+
+
+```{r}
+DGE_counts_norm <- calcNormFactors(FilteredDGEList)
+```
+
+
+
+## MHC I allele comp ##
+
+#remove each female from the analysis and rerun
+
+#GSEA for genes related to postcopulatory change in expression and male genotype
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+library(biomaRt)
+```
+
+```{r}
+# Connect to Ensembl BioMart and Papio anubis
+ensembl <- useMart("ensembl", dataset = "panubis_gene_ensembl")  
+go_annotations <- getBM(attributes = c("external_gene_name", "go_id", "name_1006"),
+                        mart = ensembl)
+TERM2GENE <- go_annotations[, c("go_id", "external_gene_name")]
+TERM2NAME <- unique(go_annotations[, c("go_id", "name_1006")])
+```
+
+
+```{r}
+females<-c("none", "Suzon", "Vuei", "Viva", "Salade", "Sottise", "Vertige")
+MHCI_result_list<-list()
+MHCI_gsea_list<-list()
+
+for (fem in females){
+  
+one_fem<-Postcop_DE_samples %>%
+  filter(FemaleID != fem)
+
+Postcop <- as.vector(one_fem$Postcop)
+Phase <- as.vector(one_fem$phasecode)
+one_fem$male_presence<-gsub(" ", "", one_fem$male_presence)
+MalePresence <- as.vector(one_fem$male_presence)
+RIN <- as.vector(one_fem$RIN)
+FemaleID <- as.vector(one_fem$FemaleID)
+MaleID<-as.vector(one_fem$MaleID)
+DyadID<-as.factor(as.vector(one_fem$DyadID))
+
+Genotype <- as.vector(one_fem$MHCI_allele_comp)
+design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+
+DGE_counts_subset<-FilteredDGEList[,one_fem$Sample_ID]
+DGE_counts_norm<-calcNormFactors(DGE_counts_subset)
+
+voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
+dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
+fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
+fit2 <- eBayes(fit, robust=TRUE)
+
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
+
+pm <- get_pm(ash_fit)
+psd<- get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+MHCI_allele_comp_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(MHCI_allele_comp_int)<- c("pm", "SE", "lfsr")
+rownames(MHCI_allele_comp_int)<-rownames(fit2)
+sig_interaction_MHCIallele_comp<-subset(MHCI_allele_comp_int, lfsr < 0.1); dim(sig_interaction_MHCIallele_comp) 
+
+MHCI_result_list[[fem]]<-sig_interaction_MHCIallele_comp
+
+original_MHCI_allele_comp_int_gene_list <- (pm)
+names(original_MHCI_allele_comp_int_gene_list) <- rownames(fit2)
+MHCI_allele_comp_int_gene_list<-na.omit(original_MHCI_allele_comp_int_gene_list)
+MHCI_allele_comp_int_gene_list = sort( (MHCI_allele_comp_int_gene_list), decreasing = TRUE)
+
+gsea_MHCI_allele_comp_int <- GSEA(
+  geneList = MHCI_allele_comp_int_gene_list,
+  TERM2GENE = TERM2GENE,
+  TERM2NAME = TERM2NAME,
+    pvalueCutoff = 0.05
+)
+
+MHCI_gsea_list[[fem]] <- gsea_MHCI_allele_comp_int
+
+}
+```
+
+#mean and SD of DE genes
+```{r}
+MHCI_result_list_edit<-lapply(names(MHCI_result_list), function(nm) {
+  df <- MHCI_result_list[[nm]]
+  df$df_name <- nm   # new column with the data frame's name in the list
+  return(df)
+})
+
+MHCI_allresults<-do.call(rbind, MHCI_result_list_edit) %>%
+  filter(df_name != "none") %>%
+  group_by(df_name) %>%
+  summarize(count=n())
+
+mean(MHCI_allresults$count)
+sd(MHCI_allresults$count)
+```
+
+
+```{r}
+gsea_MHCI_allele_comp_int_dot<-dotplot(MHCI_gsea_list[["Vuei"]], split=".sign") + facet_grid(.~.sign) +
+  theme(strip.text=element_text(size=15), axis.text.y=element_text(size=10, lineheight=0.7), axis.text.x=element_text(size=10)) +
+  ggtitle("MHCI allelic complementarity") +
+  scale_fill_gradient(low= "gray30", high="gray100");gsea_MHCI_allele_comp_int_dot
+
+```
+
+#overlap of each one with the original genes
+```{r}
+common<-intersect(rownames(MHCI_result_list[["none"]]), rownames(MHCI_result_list[["Viva"]]))
+```
+
+
+#MHC II allele comp
+
+```{r}
+females<-c("none", "Suzon", "Vuei", "Viva", "Salade", "Sottise", "Vertige")
+MHCII_result_list<-list()
+MHCII_gsea_list<-list()
+
+for (fem in females){
+  
+one_fem<-Postcop_DE_samples %>%
+  filter(FemaleID != fem)
+
+Postcop <- as.vector(one_fem$Postcop)
+Phase <- as.vector(one_fem$phasecode)
+one_fem$male_presence<-gsub(" ", "", one_fem$male_presence)
+MalePresence <- as.vector(one_fem$male_presence)
+RIN <- as.vector(one_fem$RIN)
+FemaleID <- as.vector(one_fem$FemaleID)
+MaleID<-as.vector(one_fem$MaleID)
+DyadID<-as.factor(as.vector(one_fem$DyadID))
+
+Genotype <- as.vector(one_fem$MHCII_allele_comp)
+design <- model.matrix(~ Postcop * Genotype + RIN + MalePresence + Phase)
+
+DGE_counts_subset<-FilteredDGEList[,one_fem$Sample_ID]
+DGE_counts_norm<-calcNormFactors(DGE_counts_subset)
+
+voom_matrix <- voomWithQualityWeights(counts = DGE_counts_norm, design) # normalizes counts
+dupcor <- duplicateCorrelation(voom_matrix, design, block=DyadID)
+fit <- lmFit(voom_matrix, design, block=DyadID, correlation=dupcor$consensus)
+fit2 <- eBayes(fit)
+
+beta <- fit2$coefficients[, "PostcopY:Genotype"]
+se <- fit2$stdev.unscaled[, "PostcopY:Genotype"] * fit2$sigma
+pvalues<- as.data.frame(fit2$p.value)[, "PostcopY:Genotype"]
+ash_fit <- ash(beta, se)
+
+pm <- get_pm(ash_fit)
+psd<- get_psd(ash_fit)
+lfsr <- get_lfsr(ash_fit)
+
+MHCII_allele_comp_int<-as.data.frame(cbind(pm, psd, lfsr))
+colnames(MHCII_allele_comp_int)<- c("pm", "SE", "lfsr")
+rownames(MHCII_allele_comp_int)<-rownames(fit2)
+sig_interaction_MHCIIallele_comp<-subset(MHCII_allele_comp_int, lfsr < 0.1); dim(sig_interaction_MHCIIallele_comp) 
+
+MHCII_result_list[[fem]]<-sig_interaction_MHCIIallele_comp
+
+original_MHCII_allele_comp_int_gene_list <- (pm)
+names(original_MHCII_allele_comp_int_gene_list) <- rownames(coeff)
+MHCII_allele_comp_int_gene_list<-na.omit(original_MHCII_allele_comp_int_gene_list)
+MHCII_allele_comp_int_gene_list = sort( (MHCII_allele_comp_int_gene_list), decreasing = TRUE)
+
+gsea_MHCII_allele_comp_int <- GSEA(
+  geneList = MHCII_allele_comp_int_gene_list,
+  TERM2GENE = TERM2GENE,
+  TERM2NAME = TERM2NAME,
+  pvalueCutoff = 0.05
+)
+
+MHCII_gsea_list[[fem]] <- gsea_MHCII_allele_comp_int
+
+}
+```
+
+
+#mean and SD of DE genes
+```{r}
+MHCII_result_list_edit<-lapply(names(MHCII_result_list), function(nm) {
+  df <- MHCII_result_list[[nm]]
+  df$df_name <- nm   # new column with the data frame's name in the list
+  return(df)
+})
+
+MHCII_allresults<-do.call(rbind, MHCII_result_list_edit) %>%
+  filter(df_name != "none") %>%
+  group_by(df_name) %>%
+  summarize(count=n())
+
+min(MHCII_allresults$count)
+max(MHCII_allresults$count)
+mean(MHCII_allresults$count)
+sd(MHCII_allresults$count)
+```
+#overlap of each one with the original genes
+```{r}
+common<-intersect(rownames(MHCII_result_list[["none"]]), rownames(MHCII_result_list[["Viva"]]))
+```
+
+
+#leave one out of pH analyses
+```{r}
+library(lubridate)
+library(lme4)
+library(car)
+library(sjPlot)
+library(ggeffects)
+library(ggplot2)
+library(ggpubr)
+library(tidyverse)
+library(robustlmm)
+library(XML)
+```
+
+```{r}
+pH<-read.csv("~/Library/CloudStorage/GoogleDrive-rpetersen42@gmail.com/Other computers/My MacBook Pro (1)/Dissertation/Write up/Chapter 4- Post-copulatory choice/CFC_MS/zenodo_files/pH_data.csv")
+```
+
+# post cop analyses
+
+```{r}
+Postcop_ph<-subset(pH, Postcop == "Y") #15
+
+Noncop_ph<-subset(pH, Postcop == "N" & (phase == "pre-fertile" | phase == "fertile") & (FemaleID == "Suzon" | FemaleID == "Salade" | FemaleID == "Sottise" | FemaleID == "Vertige" | FemaleID == "Vuei")) #47
+
+pH_postcop_tidy<-rbind(Postcop_ph, Noncop_ph)
+```
+
+
+# post cop analyses
+#kinship
+```{r}
+females<-c("none", "Suzon", "Vuei", "Viva", "Salade", "Sottise", "Vertige")
+kinship_result_list<-list()
+
+for (fem in females){
+  
+one_fem<-pH_postcop_tidy %>%
+  filter(FemaleID != fem)
+
+kin_mod <- rlmer(Avg.pH ~ Postcop*KINSHIP + phase + Avg.temp + (1|DyadID), data=one_fem)
+
+results<-as.data.frame(summary(kin_mod)$coefficients)[6,]
+
+output<-tab_model(kin_mod, show.p=TRUE);output
+
+results$p<-data.frame(readHTMLTable(htmlParse(output), h=T))[7,4]
+
+results$female<- fem
+
+kinship_result_list[[fem]]<-results
+
+}
+
+kinship_result_df<- as.data.frame(do.call(rbind, kinship_result_list))
+kinship_result_df$genotype<-"Kinship"
+```
+
+#MHCII allele
+```{r}
+females<-c("none", "Suzon", "Vuei", "Viva", "Salade", "Sottise", "Vertige")
+MHCIIallele_result_list<-list()
+
+for (fem in females){
+  
+one_fem<-pH_postcop_tidy %>%
+  filter(FemaleID != fem)
+
+MHCIIallele_mod <- rlmer(Avg.pH ~ Postcop*MHCII_allele_comp + phase + Avg.temp + (1|DyadID), data=one_fem)
+
+results<-as.data.frame(summary(MHCIIallele_mod)$coefficients)[6,]
+
+output<-tab_model(MHCIIallele_mod, show.p=TRUE);output
+
+results$p<-data.frame(readHTMLTable(htmlParse(output), h=T))[7,4]
+
+results$female<- fem
+
+MHCIIallele_result_list[[fem]]<-results
+
+}
+
+MHCIIallele_result_df<- as.data.frame(do.call(rbind, MHCIIallele_result_list))
+MHCIIallele_result_df$genotype<-"MHCII allele complementarity"
+```
+
+
+#MHCII super
+```{r}
+females<-c("none", "Suzon", "Vuei", "Viva", "Salade", "Sottise", "Vertige")
+MHCIIsuper_result_list<-list()
+
+for (fem in females){
+  
+one_fem<-pH_postcop_tidy %>%
+  filter(FemaleID != fem)
+
+MHCIIsuper_mod <- lmer(Avg.pH ~ Postcop*MHCII_supertype_comp + phase + Avg.temp + (1|DyadID), data=one_fem)
+
+results<-as.data.frame(summary(MHCIIsuper_mod)$coefficients)[6,]
+
+output<-tab_model(MHCIIsuper_mod, show.p=TRUE);output
+
+results$p<-data.frame(readHTMLTable(htmlParse(output), h=T))[7,4]
+
+results$female<- fem
+
+MHCIIsuper_result_list[[fem]]<-results
+
+}
+
+MHCIIsuper_result_df<- as.data.frame(do.call(rbind, MHCIIsuper_result_list))
+MHCIIsuper_result_df$genotype<-"MHCII supertype complementarity"
+```
+
+```{r}
+all_genotypes<-rbind(kinship_result_df, MHCIIallele_result_df, MHCIIsuper_result_df)
+all_genotypes$pvalueYN<-ifelse(all_genotypes$p<0.05, "Yes", "No")
+all_genotypes[ , 1:3] <- lapply(all_genotypes[ , 1:3], as.numeric)
+colnames(all_genotypes)<-c("coeff", "SE", "t", "p", "fem", "genotype", "pvalueYN")
+write.table(all_genotypes, "pH_LOO_plotdata.txt", quote=F, row.names=F, sep="\t")
+```
+
+```{r}
+pH_LOO_plot<-ggplot(data=all_genotypes, aes(x=coeff, y=fem, alpha=pvalueYN)) +
+  geom_point() +
+  geom_errorbar(aes(xmin=coeff-(1.96*SE), xmax=coeff+(1.96*SE), y=fem)) +
+  theme_bw() +
+  scale_alpha_manual(values=c(0.4, 1), name="significant")+
+  ylab("Female removed") +
+  xlab("Model coefficient") +
+  geom_vline(xintercept=0, linetype="dashed") +
+  facet_wrap(~genotype); pH_LOO_plot
+```
+
+```{r}
+ggsave("pH_LOO_forestplot.pdf", pH_LOO_plot, width=8, height=5)
+```
+
