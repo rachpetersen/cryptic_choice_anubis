@@ -17,6 +17,7 @@ Specifically, the scripts provided here are:
 
   5. pH analyses.Rmd : run linear mixed effects models to test whether 1) ovarian cycle phase, 2) copulation, or 3) male genotype (following copulation) are associated with vaginal pH and create figures in Fig 4
 
+  6. Semen_gene_analyses.Rmd: identifies genes overexpressed in semen samples and creates "semengenevector.txt" used to filter genes in postcopulatory DE analyses
 
 Data required as input for each script are hosted on Zenodo (10.5281/zenodo.14976902). The raw RNA-seq data (FASTQ files) are available on NCBI SRA at accession PRJNA1232174.
 
